@@ -1,0 +1,34 @@
+# Personal/local catalogue state
+model_catalogue.db
+free_models.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.bak*
+
+# Raw endpoint and web evidence stays local until explicitly reviewed
+snapshots/
+evidence/
+.firecrawl/
+
+# Machine and second-brain inventories
+local-harness-config-files.txt
+obsidian-model-files.txt
+obsidian-harness-inventory.json
+environment-provider-key-names.txt
+
+# Generated exports
+private-dist/
+dist/*.db
+dist/*.json
+
+# Session scratch files (task/planning state, not repo content)
+task_plan.md
+findings.md
+progress.md
+
+# Python/macOS
+__pycache__/
+*.pyc
+.DS_Store
+

@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""Human- and agent-friendly interface to the personal model catalogue."""
+from __future__ import annotations
+import argparse,json,sqlite3,sys,shutil,subprocess
+from datetime import datetime
+from pathlib import Path
+ROOT=Path(__file__).resolve().parent; DB=ROOT/'model_catalogue.db'; HOME=Path.home()
+PI_ALIAS={'opencode-zen':'opencode','nvidia-nim':'nvidia','cloudflare-ai':'cloudflare-workers-ai'}
+
+def refresh_local_harnesses():
+    scanner=ROOT/'scan_local_harnesses.py'
+    result=subprocess.run([sys.executable,str(scanner)],capture_output=True,text=True,timeout=30)
+    if result.returncode:
+        detail=(result.stderr or result.stdout).strip()
+        raise SystemExit(f'Live harness scan failed: {detail}')
+
+
+def db():
+ c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');return c
+def rows_json(rows): print(json.dumps([dict(x) for x in rows],indent=2,default=str))
+def summary(c,_):
+ print(json.dumps({
+  'provider_routes':c.execute('SELECT COUNT(*) FROM provider_models_v2').fetchone()[0],
+  'canonical_models_with_evidence':c.execute('SELECT COUNT(*) FROM canonical_models').fetchone()[0],
+  'currently_free_routes':c.execute('SELECT COUNT(*) FROM currently_free_provider_models').fetchone()[0],
+  'verified_release_events':c.execute("SELECT COUNT(*) FROM model_events WHERE confidence IN ('verified','corroborated')").fetchone()[0],
+  'evidence_sources':c.execute('SELECT COUNT(*) FROM evidence_sources').fetchone()[0],
+  'evidence_captures':c.execute('SELECT COUNT(*) FROM evidence_captures').fetchone()[0],
+  'field_level_claims':c.execute('SELECT COUNT(*) FROM evidence_claims').fetchone()[0],
+  'harnesses_known':c.execute('SELECT COUNT(*) FROM harnesses').fetchone()[0],
+  'local_harness_installations':c.execute('SELECT COUNT(*) FROM harness_installations WHERE installed=1').fetchone()[0],
+  'active_local_model_entries':c.execute('SELECT COUNT(*) FROM harness_model_entries WHERE enabled=1').fetchone()[0],
+ },indent=2))
+def free(c,a):
+ q="""SELECT provider_id,model_identifier,display_name,context_window_tokens,max_output_tokens,offer_type,starts_at,ends_at,offer_verified_at FROM currently_free_provider_models WHERE (? IS NULL OR provider_id=?) ORDER BY provider_id,display_name""";rows_json(c.execute(q,(a.provider,a.provider)).fetchall())
+def latest_free_rows(c,provider,limit=10):
+ q="""SELECT provider_id,model_identifier,display_name,context_window_tokens,max_output_tokens,offer_type,starts_at,ends_at,offer_verified_at,CAST(json_extract(provider_metadata_json,'$.created') AS INTEGER) provider_created_epoch,datetime(CAST(json_extract(provider_metadata_json,'$.created') AS INTEGER),'unixepoch') provider_created_at,endpoint_first_seen_at FROM currently_free_provider_models WHERE provider_id=? ORDER BY COALESCE(CAST(json_extract(provider_metadata_json,'$.created') AS INTEGER),0) DESC,datetime(endpoint_first_seen_at) DESC,model_identifier LIMIT ?"""
+ return c.execute(q,(provider,limit)).fetchall()
+def latest_free(c,a):rows_json(latest_free_rows(c,a.provider,a.limit))
+def free_health(c,a):
+ q="""SELECT provider_id,model_identifier,display_name,offer_type,offer_verified_at,last_tested_at,last_status,status_colour,health_state,last_ok_at,last_failure_at,latency_ms,http_status,consecutive_failures,last_error_category,last_error_message,result_description FROM current_free_model_health WHERE (? IS NULL OR provider_id=?) AND (?=0 OR health_state<>'ok') ORDER BY CASE status_colour WHEN 'red' THEN 1 WHEN 'orange' THEN 2 WHEN 'untested' THEN 3 ELSE 4 END,provider_id,model_identifier""";rows_json(c.execute(q,(a.provider,a.provider,int(a.failures_only))).fetchall())
+def free_health_summary(c,_):
+ row=c.execute("""SELECT COUNT(*) active_free_routes,SUM(CASE WHEN status_colour='green' THEN 1 ELSE 0 END) green_ok,SUM(CASE WHEN status_colour='orange' THEN 1 ELSE 0 END) orange_rate_limited,SUM(CASE WHEN status_colour='red' THEN 1 ELSE 0 END) red_failed,SUM(CASE WHEN status_colour='untested' THEN 1 ELSE 0 END) untested,MIN(last_tested_at) oldest_last_tested_at,MAX(last_tested_at) newest_last_tested_at FROM current_free_model_health""").fetchone();daily=c.execute("SELECT COUNT(*) retained_daily_rows,MIN(test_date) oldest_day,MAX(test_date) newest_day FROM free_model_probe_daily").fetchone();out=dict(row);out['retention']=dict(daily);print(json.dumps(out,indent=2,default=str))
+def latest(c,a):
+ q="""SELECT canonical_name,event_type,event_time,time_precision,provider_id,model_identifier,evidence_url,confidence FROM latest_verified_model_events ORDER BY datetime(event_time) DESC LIMIT ?""";rows_json(c.execute(q,(a.limit,)).fetchall())
+def providers(c,_):rows_json(c.execute('SELECT provider_id,display_name,api_style,base_url,auth_env_var,pricing_policy,free_definition,last_verified_at FROM providers ORDER BY display_name').fetchall())
+def subscriptions(c,a):
+ q="""SELECT sp.product_slug,sp.vendor,sp.display_name,sp.tier_name,sp.product_type,sp.billing_model,sp.monthly_price,sp.currency,sp.product_status,sp.last_verified_at,sp.confidence,
+ pe.entitlement_status,pe.relationship_type,pe.organization_label,pe.confirmed_at,pe.confidence entitlement_confidence,
+ (SELECT COUNT(*) FROM subscription_model_access sma WHERE sma.subscription_product_id=sp.subscription_product_id) model_links
+ FROM subscription_products sp LEFT JOIN personal_subscription_entitlements pe ON pe.subscription_product_id=sp.subscription_product_id
+ WHERE (?=0 OR pe.entitlement_status IN ('active','trial','reported','conflicting')) ORDER BY CASE WHEN pe.entitlement_status IS NULL THEN 1 ELSE 0 END,sp.vendor,sp.display_name"""
+ rows_json(c.execute(q,(int(a.mine),)).fetchall())
+def subscription(c,a):
+ row=c.execute("""SELECT sp.*,pe.entitlement_status,pe.account_label,pe.organization_label,pe.relationship_type,pe.confirmed_at,pe.confirmation_source,pe.confidence entitlement_confidence,pe.notes entitlement_notes FROM subscription_products sp LEFT JOIN personal_subscription_entitlements pe ON pe.subscription_product_id=sp.subscription_product_id WHERE sp.product_slug=?""",(a.product,)).fetchone()
+ if not row:raise SystemExit('Subscription product not found')
+ links=[dict(x) for x in c.execute("""SELECT sma.access_type,sma.harness_id,sma.harness_model_identifier,pm.provider_id,pm.model_identifier,pm.display_name,sma.quota_json,sma.client_restrictions_json,sma.confidence,sma.last_verified_at,sma.notes FROM subscription_model_access sma LEFT JOIN provider_models_v2 pm USING(provider_model_id) WHERE sma.subscription_product_id=? ORDER BY COALESCE(pm.provider_id,sma.harness_id),COALESCE(pm.model_identifier,sma.harness_model_identifier)""",(row['subscription_product_id'],))]
+ out=dict(row);out['models']=links;print(json.dumps(out,indent=2,default=str))
+def model_info(c,a):
+ pat='%'+a.model+'%'
+ canon=[dict(x) for x in c.execute("""SELECT canonical_model_id,canonical_slug,canonical_name,developer,family,architecture,total_parameters,active_parameters,training_tokens,weights_status,license_spdx,lifecycle_status,model_card_url,official_repository_url FROM canonical_models WHERE canonical_slug LIKE ? OR canonical_name LIKE ? OR developer LIKE ? OR family LIKE ? ORDER BY canonical_name""",(pat,pat,pat,pat))]
+ routes=[dict(x) for x in c.execute("""SELECT pm.provider_model_id,pm.provider_id,pm.model_identifier,pm.display_name,pm.endpoint_status,pm.endpoint_first_seen_at,pm.endpoint_last_seen_at,pm.context_window_tokens,pm.max_output_tokens,pm.reasoning,pm.tools,cm.canonical_name,cm.developer,cm.family,cm.total_parameters,cm.active_parameters,
+ (SELECT ao.offer_type FROM access_offers ao WHERE ao.provider_model_id=pm.provider_model_id AND (ao.ends_at IS NULL OR datetime(ao.ends_at)>datetime('now')) ORDER BY CASE ao.offer_type WHEN 'genuine_zero_price' THEN 1 WHEN 'temporary_free_window' THEN 2 WHEN 'free_tier_quota' THEN 3 WHEN 'subscription_included' THEN 4 WHEN 'paid' THEN 5 ELSE 6 END LIMIT 1) access_type,
+ (SELECT ht.status FROM handshake_tests ht WHERE ht.provider_model_id=pm.provider_model_id ORDER BY datetime(ht.tested_at) DESC,ht.handshake_test_id DESC LIMIT 1) last_test_status,
+ (SELECT ht.tested_at FROM handshake_tests ht WHERE ht.provider_model_id=pm.provider_model_id ORDER BY datetime(ht.tested_at) DESC,ht.handshake_test_id DESC LIMIT 1) last_tested_at
+ FROM provider_models_v2 pm LEFT JOIN canonical_models cm USING(canonical_model_id)
+ WHERE pm.model_identifier LIKE ? OR pm.display_name LIKE ? OR cm.canonical_name LIKE ? OR cm.developer LIKE ? OR cm.family LIKE ? ORDER BY cm.canonical_name,pm.provider_id,pm.model_identifier""",(pat,pat,pat,pat,pat))]
+ for route_row in routes:
+  test=c.execute('''SELECT harness_id,tested_at,test_type,status,latency_ms,observed_features_json,sanitized_error,runner_version FROM handshake_tests WHERE provider_model_id=? ORDER BY datetime(tested_at) DESC,handshake_test_id DESC LIMIT 1''',(route_row['provider_model_id'],)).fetchone()
+  route_row['last_test']=_test_summary(test)
+  route_row.pop('last_test_status',None);route_row.pop('last_tested_at',None)
+ ids=[x['canonical_model_id'] for x in canon]
+ events=[]
+ if ids:
+  marks=','.join('?'*len(ids));events=[dict(x) for x in c.execute(f"SELECT event_type,event_time,time_precision,confidence,evidence_source_id FROM model_events WHERE canonical_model_id IN ({marks}) ORDER BY datetime(event_time) DESC",ids)]
+ print(json.dumps({'query':a.model,'canonical_models':canon,'routes':routes,'events':events},indent=2,default=str))
+def maker_models(c,a):
+ pat='%'+a.maker+'%'
+ rows_json(c.execute("""SELECT cm.developer,cm.canonical_name,cm.family,cm.total_parameters,cm.active_parameters,pm.provider_id,pm.model_identifier,pm.endpoint_status,pm.context_window_tokens,pm.max_output_tokens FROM provider_models_v2 pm LEFT JOIN canonical_models cm USING(canonical_model_id) WHERE cm.developer LIKE ? OR cm.canonical_name LIKE ? OR cm.family LIKE ? OR pm.model_identifier LIKE ? OR pm.display_name LIKE ? ORDER BY cm.canonical_name,pm.provider_id,pm.model_identifier""",(pat,pat,pat,pat,pat)).fetchall())
+def warp_models(c,a):
+ rows_json(c.execute("""SELECT a.position,a.provider_name,a.model_identifier,a.display_name,a.metadata_json,t.tested_at last_tested_at,t.status last_test_status,t.latency_ms,t.exact_output,t.sanitized_error FROM harness_available_model_entries a JOIN harness_installations i USING(installation_id) LEFT JOIN latest_harness_model_tests t ON t.harness_id='obsidian-warp' AND t.model_identifier=a.model_identifier WHERE i.harness_id='obsidian-warp' AND a.last_observed_at=i.last_scanned_at AND (?=0 OR json_extract(a.metadata_json,'$.custom_uuid')=1) ORDER BY a.position""",(int(a.custom),)).fetchall())
+def route(c,a):
+ row=c.execute("""SELECT pm.*,p.display_name provider_name,p.api_style,p.base_url,p.auth_env_var,cm.canonical_name,cm.developer,cm.family FROM provider_models_v2 pm JOIN providers p USING(provider_id) LEFT JOIN canonical_models cm USING(canonical_model_id) WHERE pm.provider_id=? AND pm.model_identifier=?""",(a.provider,a.model)).fetchone()
+ if not row:raise SystemExit('Provider/model route not found')
+ offers=[dict(x) for x in c.execute('SELECT offer_type,starts_at,ends_at,input_price_per_million_usd,output_price_per_million_usd,quota_json,rate_limits_json,confidence,last_verified_at FROM access_offers WHERE provider_model_id=? ORDER BY last_verified_at DESC',(row['provider_model_id'],))]
+ out=dict(row);out['offers']=offers;out['last_test']=_latest_test(c,row['provider_model_id']);print(json.dumps(out,indent=2,default=str))
+def changes(c,a):
+ q="""SELECT ec.endpoint_change_id,ec.provider_id,ec.change_type,ec.model_identifier,ec.detected_at,ec.reviewed,ec.review_notes FROM endpoint_changes ec WHERE (? IS NULL OR ec.provider_id=?) AND (? OR ec.reviewed=0) ORDER BY datetime(ec.detected_at) DESC LIMIT ?""";rows_json(c.execute(q,(a.provider,a.provider,int(a.all),a.limit)).fetchall())
+def monitor_status(c,_):
+ q="""SELECT mt.provider_id,mt.target_type,mt.url,mt.enabled,mt.last_checked_at,mt.last_changed_at,mt.last_success_at,mt.consecutive_failures,(SELECT status FROM monitoring_runs mr WHERE mr.monitoring_target_id=mt.monitoring_target_id ORDER BY mr.monitoring_run_id DESC LIMIT 1) last_status FROM monitoring_targets mt ORDER BY mt.provider_id,mt.target_type""";rows_json(c.execute(q).fetchall())
+def pi_order(c,_):
+ path=HOME/'.pi/agent/settings.json';d=json.loads(path.read_text());default=f"{d.get('defaultProvider')}/{d.get('defaultModel')}" if d.get('defaultProvider') and d.get('defaultModel') else None
+ print(json.dumps({'config_path':str(path),'default':default,'count':len(d.get('enabledModels',[])),'models':[{'position':i,'model':m,'is_default':m==default} for i,m in enumerate(d.get('enabledModels',[]),1)]},indent=2))
+def harnesses(c,_): rows_json(c.execute('SELECT h.harness_id,h.display_name,h.category,i.installed,i.version,i.executable_path,i.config_path,i.last_scanned_at FROM harnesses h LEFT JOIN harness_installations i ON i.harness_id=h.harness_id AND i.machine_id=\'aubrey-macbook\' ORDER BY COALESCE(i.installed,0) DESC,h.display_name').fetchall())
+def harness_models(c,a):
+    kinds={'all':None,'configured':'configured','available':'available'}
+    kind=kinds[a.kind]
+    configured="""SELECT h.harness_id,e.position,e.configured_provider_name provider_name,e.configured_model_identifier model_identifier,e.display_name,e.is_default,e.reasoning_level,e.enabled, 'configured' record_type,e.config_source_path source_path FROM harness_model_entries e JOIN harness_installations i USING(installation_id) JOIN harnesses h USING(harness_id) WHERE h.harness_id=? AND (? OR e.enabled=1)"""
+    available="""SELECT h.harness_id,a.position,a.provider_name,a.model_identifier,a.display_name,0 is_default,NULL reasoning_level,1 enabled,'available' record_type,a.source_path source_path FROM harness_available_model_entries a JOIN harness_installations i USING(installation_id) JOIN harnesses h USING(harness_id) WHERE h.harness_id=? AND a.last_observed_at=i.last_scanned_at"""
+    parts=[];params=[]
+    if kind in (None,'configured'):parts.append(configured);params.extend([a.harness,int(a.history)])
+    if kind in (None,'available'):parts.append(available);params.append(a.harness)
+    q=' UNION ALL '.join(parts)+' ORDER BY record_type,enabled DESC,position,provider_name,model_identifier'
+    rows_json(c.execute(q,params).fetchall())
+def _search_tokens(value):
+    import re
+    return set(re.findall(r'[a-z0-9]+',str(value or '').lower()))
+
+
+def _matches_model(query, *values):
+    wanted=_search_tokens(query)
+    if not wanted:return False
+    haystack=set()
+    for value in values:haystack.update(_search_tokens(value))
+    return wanted.issubset(haystack)
+
+
+def _decode_json(value):
+    if not value:return None
+    try:return json.loads(value)
+    except (TypeError,json.JSONDecodeError):return value
+
+
+def _test_summary(row):
+    if not row:return None
+    features=_decode_json(row['observed_features_json'])
+    reply=features.get('reply') if isinstance(features,dict) else None
+    http_status=features.get('http_status') if isinstance(features,dict) else None
+    outcome=f'reply {reply}' if reply is not None else (row['sanitized_error'] or row['status'])
+    return {
+        'source':'handshake_tests','harness_id':row['harness_id'],'tested_at':row['tested_at'],
+        'test_type':row['test_type'],'status':row['status'],'outcome':outcome,
+        'http_status':http_status,'latency_ms':row['latency_ms'],
+        'observed_features':features,'sanitized_error':row['sanitized_error'],
+        'runner_version':row['runner_version'],
+    }
+
+
+def _health_test_summary(row):
+    if not row or not row['last_tested_at']:return None
+    return {
+        'source':'free_model_probe','harness_id':None,'tested_at':row['last_tested_at'],
+        'test_type':'free_model_health','status':row['last_status'],
+        'outcome':row['result_description'],'http_status':row['http_status'],
+        'latency_ms':row['latency_ms'],'observed_features':None,
+        'sanitized_error':row['last_error_message'],'runner_version':None,
+    }
+
+
+def _is_newer(candidate,current):
+    return candidate is not None and (current is None or str(candidate.get('tested_at') or '') > str(current.get('tested_at') or ''))
+
+
+def _latest_test(c,provider_model_id):
+    handshake=c.execute('''SELECT harness_id,tested_at,test_type,status,latency_ms,observed_features_json,sanitized_error,runner_version FROM handshake_tests WHERE provider_model_id=? ORDER BY datetime(tested_at) DESC,handshake_test_id DESC LIMIT 1''',(provider_model_id,)).fetchone()
+    health=c.execute('''SELECT last_tested_at,last_status,last_error_message,result_description,http_status,latency_ms FROM current_free_model_health WHERE provider_model_id=?''',(provider_model_id,)).fetchone()
+    candidates=[x for x in (_test_summary(handshake),_health_test_summary(health)) if x]
+    return max(candidates,key=lambda x:str(x.get('tested_at') or '')) if candidates else None
+
+
+def where(c,a):
+    """Return provider routes and cached harness matches in one fast read.
+
+    This command is deliberately read-only by default. A live harness scan is
+    expensive and is not needed to answer provider availability questions;
+    callers can opt into it with --refresh-harnesses.
+    """
+    route_rows=c.execute("""SELECT pm.provider_model_id,pm.provider_id,p.display_name provider_name,
+        pm.model_identifier,pm.display_name,pm.endpoint_status,pm.endpoint_first_seen_at,
+        pm.endpoint_last_seen_at,pm.context_window_tokens,pm.max_input_tokens,
+        pm.max_output_tokens,pm.reasoning,pm.tools,pm.function_calling,
+        pm.structured_outputs,pm.streaming,pm.input_modalities_json,pm.output_modalities_json,
+        p.base_url,p.api_style,p.official_models_endpoint,p.last_verified_at provider_last_verified_at,
+        cm.canonical_name,cm.developer,cm.family
+      FROM provider_models_v2 pm JOIN providers p USING(provider_id)
+      LEFT JOIN canonical_models cm USING(canonical_model_id)
+      WHERE pm.endpoint_status NOT IN ('unavailable','removed')
+      ORDER BY p.display_name,pm.model_identifier""").fetchall()
+    matched=[]
+    matched_ids=[]
+    for row in route_rows:
+        if not _matches_model(a.model,row['provider_id'],row['provider_name'],row['model_identifier'],row['display_name'],row['canonical_name'],row['developer'],row['family']):continue
+        item=dict(row)
+        item['record_type']='provider_route'
+        item['input_modalities']=json.loads(item.pop('input_modalities_json')) if item.get('input_modalities_json') else None
+        item['output_modalities']=json.loads(item.pop('output_modalities_json')) if item.get('output_modalities_json') else None
+        matched.append(item);matched_ids.append(row['provider_model_id'])
+    offers={}
+    if matched_ids:
+        placeholders=','.join('?'*len(matched_ids))
+        for row in c.execute(f"""SELECT provider_model_id,offer_type,starts_at,ends_at,
+            input_price_per_million_usd,output_price_per_million_usd,quota_json,
+            rate_limits_json,requires_payment_method,requires_subscription,confidence,last_verified_at
+          FROM access_offers WHERE provider_model_id IN ({placeholders})
+          ORDER BY datetime(last_verified_at) DESC""",matched_ids):
+            offer=dict(row);offer.pop('provider_model_id')
+            for key in ('quota_json','rate_limits_json'):
+                if offer.get(key):
+                    try:offer[key[:-5]]=json.loads(offer.pop(key))
+                    except json.JSONDecodeError:offer[key[:-5]]=offer.pop(key)
+                else:offer.pop(key)
+            offers.setdefault(row['provider_model_id'],[]).append(offer)
+    tests={}
+    if matched_ids:
+        placeholders=','.join('?'*len(matched_ids))
+        for row in c.execute(f"""SELECT ht.provider_model_id,ht.harness_id,ht.tested_at,ht.test_type,
+            ht.status,ht.latency_ms,ht.observed_features_json,ht.sanitized_error,ht.runner_version
+          FROM handshake_tests ht WHERE ht.provider_model_id IN ({placeholders})
+          AND NOT EXISTS (SELECT 1 FROM handshake_tests newer
+            WHERE newer.provider_model_id=ht.provider_model_id
+              AND (datetime(newer.tested_at)>datetime(ht.tested_at)
+                OR (newer.tested_at=ht.tested_at AND newer.handshake_test_id>ht.handshake_test_id)))""",matched_ids):
+            tests[row['provider_model_id']]=_test_summary(row)
+        for row in c.execute(f"""SELECT provider_model_id,last_tested_at,last_status,last_error_message,
+            result_description,http_status,latency_ms FROM current_free_model_health
+          WHERE provider_model_id IN ({placeholders})""",matched_ids):
+            candidate=_health_test_summary(row)
+            if _is_newer(candidate,tests.get(row['provider_model_id'])):
+                tests[row['provider_model_id']]=candidate
+    for item in matched:
+        item['offers']=offers.get(item['provider_model_id'],[])
+        item['last_test']=tests.get(item['provider_model_id'])
+        item.pop('provider_model_id',None)
+
+    harness=[]
+    if not getattr(a,'no_harnesses',False):
+        cached=c.execute("""SELECT h.harness_id,e.position,e.configured_provider_name provider_name,
+            e.configured_model_identifier model_identifier,e.display_name,e.is_default,e.enabled,
+            'configured' record_type,e.config_source_path source_path,i.last_scanned_at
+          FROM harness_model_entries e JOIN harness_installations i USING(installation_id)
+          JOIN harnesses h USING(harness_id)
+          WHERE e.enabled=1
+          UNION ALL
+          SELECT h.harness_id,a.position,a.provider_name,a.model_identifier,a.display_name,0,1,
+            'available',a.source_path,i.last_scanned_at
+          FROM harness_available_model_entries a JOIN harness_installations i USING(installation_id)
+          JOIN harnesses h USING(harness_id)
+          WHERE a.last_observed_at=i.last_scanned_at
+          ORDER BY 1,8,2""").fetchall()
+        for row in cached:
+            if _matches_model(a.model,row['provider_name'],row['model_identifier'],row['display_name']):
+                harness.append(dict(row))
+    provider_ids=sorted({item['provider_id'] for item in matched})
+    monitoring=[]
+    if provider_ids:
+        placeholders=','.join('?'*len(provider_ids))
+        monitoring=[dict(row) for row in c.execute(f"""SELECT provider_id,target_type,url,enabled,last_checked_at,
+            last_changed_at,last_success_at,consecutive_failures
+          FROM monitoring_targets WHERE provider_id IN ({placeholders}) ORDER BY provider_id,target_type""",provider_ids)]
+    observed=[item['endpoint_last_seen_at'] for item in matched if item.get('endpoint_last_seen_at')]
+    checked=[item['last_checked_at'] for item in monitoring if item.get('last_checked_at')]
+    print(json.dumps({
+        'query':a.model,
+        'provider_routes':matched,
+        'harness_matches':harness,
+        'freshness':{
+            'latest_route_observed_at':max(observed) if observed else None,
+            'latest_monitor_checked_at':max(checked) if checked else None,
+            'monitoring_targets':monitoring,
+            'harness_scan_was_refreshed':bool(getattr(a,'refresh_harnesses',False)),
+        },
+    },indent=2,default=str))
+def order_diff(c,a):
+ def profile(name):return [f"{r['provider_id']}/{r['model_identifier']}" for r in c.execute("SELECT e.provider_id,e.model_identifier FROM model_order_profile_entries e JOIN model_order_profiles p USING(profile_id) WHERE p.harness_id=? AND p.profile_name=? ORDER BY e.position",(a.harness,name))]
+ current=profile('current-local-order');preferred=profile('aubrey-preferred-order');
+ out={'harness':a.harness,'current_count':len(current),'preferred_count':len(preferred),'matches':current==preferred,'missing_from_current':[x for x in preferred if x not in current],'unexpected_current':[x for x in current if x not in preferred],'moves':[]}
+ pos={x:i+1 for i,x in enumerate(current)}
+ for i,x in enumerate(preferred,1):
+  if x in pos and pos[x]!=i:out['moves'].append({'model':x,'current':pos[x],'preferred':i,'distance':pos[x]-i})
+ print(json.dumps(out,indent=2))
+def doctor(c,_):
+ checks={
+  'integrity':c.execute('PRAGMA integrity_check').fetchone()[0],
+  'routes_missing_context':c.execute('SELECT COUNT(*) FROM provider_models_v2 WHERE context_window_tokens IS NULL').fetchone()[0],
+  'routes_missing_output_limit':c.execute('SELECT COUNT(*) FROM provider_models_v2 WHERE max_output_tokens IS NULL').fetchone()[0],
+  'canonical_models_without_verified_release_event':c.execute("SELECT COUNT(*) FROM canonical_models cm WHERE NOT EXISTS(SELECT 1 FROM model_events e WHERE e.canonical_model_id=cm.canonical_model_id AND e.event_type IN ('general_release','api_availability') AND e.confidence IN ('verified','corroborated'))").fetchone()[0],
+  'active_free_offers_without_end_date':c.execute("SELECT COUNT(*) FROM access_offers WHERE offer_type='temporary_free_window' AND ends_at IS NULL").fetchone()[0],
+  'claims_without_capture':c.execute('SELECT COUNT(*) FROM evidence_claims WHERE evidence_capture_id IS NULL').fetchone()[0],
+  'unreviewed_endpoint_changes':c.execute('SELECT COUNT(*) FROM endpoint_changes WHERE reviewed=0').fetchone()[0],
+  'pi_order_matches_preference':c.execute("SELECT COUNT(*) FROM model_order_profile_entries e JOIN model_order_profiles p USING(profile_id) WHERE p.harness_id='pi' AND p.profile_name='current-local-order'").fetchone()[0]==c.execute("SELECT COUNT(*) FROM model_order_profile_entries e JOIN model_order_profiles p USING(profile_id) WHERE p.harness_id='pi' AND p.profile_name='aubrey-preferred-order'").fetchone()[0],
+ }
+ print(json.dumps(checks,indent=2))
+def recommend(c,a):
+ conditions=["pm.endpoint_status='available'"];params=[]
+ if a.free:conditions.append("ao.offer_type IN ('genuine_zero_price','temporary_free_window') AND (ao.ends_at IS NULL OR datetime(ao.ends_at)>datetime('now'))")
+ if a.provider:conditions.append('pm.provider_id=?');params.append(a.provider)
+ task=a.task.lower(); task_score="CASE WHEN lower(COALESCE(pm.display_name,pm.model_identifier)) LIKE '%code%' OR lower(COALESCE(cm.family,'')) IN ('glm','kimi','nemotron 3') THEN 30 ELSE 0 END" if task=='coding' else '0'
+ q=f"""SELECT pm.provider_id,pm.model_identifier,pm.display_name,pm.context_window_tokens,pm.max_output_tokens,ao.offer_type,({task_score}+CASE WHEN pm.reasoning=1 THEN 15 ELSE 0 END+CASE WHEN pm.tools=1 THEN 10 ELSE 0 END+CASE WHEN pm.context_window_tokens>=1000000 THEN 10 WHEN pm.context_window_tokens>=200000 THEN 5 ELSE 0 END) score FROM provider_models_v2 pm LEFT JOIN canonical_models cm USING(canonical_model_id) LEFT JOIN access_offers ao ON ao.provider_model_id=pm.provider_model_id AND ao.ends_at IS NULL WHERE {' AND '.join(conditions)} ORDER BY score DESC,pm.context_window_tokens DESC LIMIT ?""";params.append(a.limit);rows_json(c.execute(q,params).fetchall())
+def pi_provider_fragment(c,pid,mid):
+ row=c.execute('SELECT pm.*,p.display_name provider_name,p.base_url,p.api_style,p.auth_env_var FROM provider_models_v2 pm JOIN providers p ON p.provider_id=pm.provider_id WHERE pm.provider_id=? AND pm.model_identifier=?',(pid,mid)).fetchone()
+ if not row:raise SystemExit('Provider/model route not found')
+ inp=json.loads(row['input_modalities_json']) if row['input_modalities_json'] and row['input_modalities_json'].startswith('[') else ['text']
+ provider={'name':row['provider_name'],'api':row['api_style'],'baseUrl':row['base_url'],'apiKey':f"${row['auth_env_var']}" if row['auth_env_var'] else None,'models':[{'id':mid,'name':row['display_name'] or mid,'reasoning':bool(row['reasoning']),'input':inp,'contextWindow':row['context_window_tokens'] or 128000,'maxTokens':row['max_output_tokens'] or 16384}]}
+ return {k:v for k,v in provider.items() if v is not None}
+def pi_fragment(c,a):print(json.dumps({'providers':{a.provider:pi_provider_fragment(c,a.provider,a.model)}},indent=2))
+def write_pi_settings(path,d):
+ backup=path.with_name(path.name+'.bak.modelctl-'+datetime.now().strftime('%Y%m%d-%H%M%S'));shutil.copy2(path,backup);tmp=path.with_suffix('.json.tmp');tmp.write_text(json.dumps(d,indent=2)+'\n');json.loads(tmp.read_text());tmp.replace(path);return backup
+def register_pi_model(c,provider,model,apply):
+ path=HOME/'.pi/agent/models.json';d=json.loads(path.read_text()) if path.exists() else {'providers':{}};fragment=pi_provider_fragment(c,provider,model);existing=d.setdefault('providers',{}).get(provider,{})
+ models=[x for x in existing.get('models',[]) if x.get('id')!=model]+fragment['models'];merged={**fragment,**existing,'models':models};d['providers'][provider]=merged
+ out={'provider':provider,'model':model,'already_registered':any(x.get('id')==model for x in existing.get('models',[])),'apply':apply}
+ if apply:out['backup']=str(write_pi_settings(path,d)) if path.exists() else None;path.write_text(json.dumps(d,indent=2)+'\n') if not path.exists() else None
+ return out
+def pi_register(c,a):print(json.dumps(register_pi_model(c,a.provider,a.model,a.apply),indent=2))
+def select_pi_model(a):
+ path=HOME/'.pi/agent/settings.json';d=json.loads(path.read_text());prefix=PI_ALIAS.get(a.provider,a.provider);entry=f'{prefix}/{a.model}'
+ before=list(d.get('enabledModels',[]));models=[x for x in before if x!=entry];position=max(1,min(a.position if a.position is not None else len(models)+1,len(models)+1));models.insert(position-1,entry);d['enabledModels']=models
+ if a.default:d['defaultProvider']=prefix;d['defaultModel']=a.model
+ out={'entry':entry,'position':position,'set_default':a.default,'before_position':before.index(entry)+1 if entry in before else None,'after_position':position,'apply':a.apply}
+ if a.apply:out['backup']=str(write_pi_settings(path,d))
+ return out
+def pi_select(c,a):print(json.dumps(select_pi_model(a),indent=2))
+def pi_add_latest_free(c,a):
+ candidates=latest_free_rows(c,a.provider,1)
+ if not candidates:raise SystemExit(f'No currently free route found for provider {a.provider}')
+ chosen=candidates[0];a.model=chosen['model_identifier'];registration=register_pi_model(c,a.provider,a.model,a.apply);selection=select_pi_model(a);print(json.dumps({'candidate':dict(chosen),'registration':registration,'selection':selection},indent=2,default=str))
+def pi_remove(c,a):
+ path=HOME/'.pi/agent/settings.json';d=json.loads(path.read_text());entry=f"{PI_ALIAS.get(a.provider,a.provider)}/{a.model}";before=list(d.get('enabledModels',[]));d['enabledModels']=[x for x in before if x!=entry]
+ if entry not in before:raise SystemExit('Model is not enabled in Pi')
+ if d.get('defaultProvider')==PI_ALIAS.get(a.provider,a.provider) and d.get('defaultModel')==a.model:raise SystemExit('Refusing to remove the current default model; select another default first')
+ out={'entry':entry,'before_position':before.index(entry)+1,'apply':a.apply}
+ if a.apply:out['backup']=str(write_pi_settings(path,d))
+ print(json.dumps(out,indent=2))
+def main():
+ p=argparse.ArgumentParser(prog='modelctl');s=p.add_subparsers(dest='cmd',required=True)
+ s.add_parser('summary').set_defaults(fn=summary)
+ x=s.add_parser('free');x.add_argument('--provider');x.set_defaults(fn=free)
+ x=s.add_parser('latest-free');x.add_argument('--provider',default='openrouter');x.add_argument('--limit',type=int,default=10);x.set_defaults(fn=latest_free)
+ x=s.add_parser('free-health');x.add_argument('--provider');x.add_argument('--failures-only',action='store_true');x.set_defaults(fn=free_health)
+ s.add_parser('free-health-summary').set_defaults(fn=free_health_summary)
+ x=s.add_parser('latest');x.add_argument('--limit',type=int,default=20);x.set_defaults(fn=latest)
+ s.add_parser('providers').set_defaults(fn=providers)
+ x=s.add_parser('subscriptions');x.add_argument('--mine',action='store_true');x.set_defaults(fn=subscriptions)
+ x=s.add_parser('subscription');x.add_argument('product');x.set_defaults(fn=subscription)
+ x=s.add_parser('model-info');x.add_argument('model');x.set_defaults(fn=model_info)
+ x=s.add_parser('maker-models');x.add_argument('maker');x.set_defaults(fn=maker_models)
+ x=s.add_parser('warp-models');x.add_argument('--custom',action='store_true');x.set_defaults(fn=warp_models)
+ x=s.add_parser('route');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=route)
+ x=s.add_parser('changes');x.add_argument('--provider');x.add_argument('--all',action='store_true');x.add_argument('--limit',type=int,default=50);x.set_defaults(fn=changes)
+ s.add_parser('monitor-status').set_defaults(fn=monitor_status)
+ s.add_parser('pi-order').set_defaults(fn=pi_order)
+ s.add_parser('harnesses').set_defaults(fn=harnesses)
+ x=s.add_parser('harness-models');x.add_argument('harness');x.add_argument('--history',action='store_true');x.add_argument('--kind',choices=['all','configured','available'],default='all');x.set_defaults(fn=harness_models)
+ x=s.add_parser('where');x.add_argument('model');x.add_argument('--refresh-harnesses',action='store_true',help='Refresh local harness config before matching; slower');x.add_argument('--no-harnesses',action='store_true',help='Skip cached local harness matches');x.set_defaults(fn=where)
+ x=s.add_parser('order-diff');x.add_argument('harness',default='pi',nargs='?');x.set_defaults(fn=order_diff)
+ s.add_parser('doctor').set_defaults(fn=doctor)
+ x=s.add_parser('recommend');x.add_argument('--task',default='coding');x.add_argument('--free',action='store_true');x.add_argument('--provider');x.add_argument('--limit',type=int,default=10);x.set_defaults(fn=recommend)
+ x=s.add_parser('pi-fragment');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=pi_fragment)
+ x=s.add_parser('pi-register');x.add_argument('provider');x.add_argument('model');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_register)
+ x=s.add_parser('pi-select');x.add_argument('provider');x.add_argument('model');x.add_argument('--position',type=int);x.add_argument('--default',action='store_true');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_select)
+ x=s.add_parser('pi-add-latest-free');x.add_argument('--provider',default='openrouter');x.add_argument('--position',type=int);x.add_argument('--default',action='store_true');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_add_latest_free)
+ x=s.add_parser('pi-remove');x.add_argument('provider');x.add_argument('model');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_remove)
+ a=p.parse_args()
+ if a.cmd in {'harnesses','harness-models','warp-models'} or (a.cmd=='where' and a.refresh_harnesses):refresh_local_harnesses()
+ c=db();a.fn(c,a)
+if __name__=='__main__':main()

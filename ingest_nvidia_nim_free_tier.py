@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Ingest approved NVIDIA NIM free developer-tier evidence and bounded health results."""
+from __future__ import annotations
+import hashlib,json,sqlite3
+from datetime import datetime,timezone
+from pathlib import Path
+ROOT=Path(__file__).resolve().parent;DB=ROOT/'model_catalogue.db';EVID=ROOT/'evidence'/'nvidia-nim';RESULTS=EVID/'nvidia-nim-trial-results-2026-07-21.json';NOW=datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+SOURCES=[
+ ('https://developer.nvidia.com/nim','NVIDIA NIM for Developers',EVID/'nvidia-nim-for-developers.md'),
+ ('https://build.nvidia.com/settings/api-keys','NVIDIA API Keys',EVID/'nvidia-api-keys.md'),
+ ('https://developer.nvidia.com/blog/access-to-nvidia-nim-now-available-free-to-developer-program-members/','NVIDIA free NIM access announcement',EVID/'nvidia-free-nim-announcement.md'),
+]
+def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def add_source(c,url,title,path,stype='official_docs'):
+ h=digest(path);c.execute("""INSERT INTO evidence_sources(url,source_type,publisher,title,official,primary_source,retrieved_at,content_sha256,archived_path,http_status,trust_priority,verification_status)
+ VALUES(?,?, 'NVIDIA',?,1,1,?,?,?,200,1,'verified') ON CONFLICT(url) DO UPDATE SET retrieved_at=excluded.retrieved_at,content_sha256=excluded.content_sha256,archived_path=excluded.archived_path,verification_status='verified'""",(url,stype,title,NOW,h,str(path)))
+ sid=c.execute('SELECT evidence_source_id FROM evidence_sources WHERE url=?',(url,)).fetchone()[0];c.execute("""INSERT OR IGNORE INTO evidence_captures(evidence_source_id,retrieved_at,content_sha256,archived_path,http_status,extraction_method,extractor_version)
+ VALUES(?,?,?,?,200,'firecrawl','1.16.0')""",(sid,NOW,h,str(path)));cap=c.execute('SELECT evidence_capture_id FROM evidence_captures WHERE evidence_source_id=? AND content_sha256=?',(sid,h)).fetchone()[0];return sid,cap
+c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');c.execute('BEGIN')
+source_ids=[add_source(c,*x) for x in SOURCES];primary_sid,primary_cap=source_ids[0]
+test_url='file://'+str(RESULTS);h=digest(RESULTS);c.execute("""INSERT INTO evidence_sources(url,source_type,publisher,title,official,primary_source,retrieved_at,content_sha256,archived_path,trust_priority,verification_status)
+VALUES(?,'local_observation','AZ Labs','NVIDIA NIM 119-route Hyperfine exact-OK test',0,1,?,?,?,10,'verified') ON CONFLICT(url) DO UPDATE SET retrieved_at=excluded.retrieved_at,content_sha256=excluded.content_sha256,archived_path=excluded.archived_path""",(test_url,NOW,h,str(RESULTS)));test_sid=c.execute('SELECT evidence_source_id FROM evidence_sources WHERE url=?',(test_url,)).fetchone()[0];c.execute("""INSERT OR IGNORE INTO evidence_captures(evidence_source_id,retrieved_at,content_sha256,archived_path,extraction_method,extractor_version) VALUES(?,?,?,?, 'hyperfine-parallel-probe','1.0')""",(test_sid,NOW,h,str(RESULTS)));test_cap=c.execute('SELECT evidence_capture_id FROM evidence_captures WHERE evidence_source_id=? AND content_sha256=?',(test_sid,h)).fetchone()[0]
+c.execute("UPDATE providers SET pricing_policy='free developer/evaluation tier',free_definition='Official NVIDIA: free access to NIM API endpoints for unlimited prototyping; free serverless APIs for development; not permanent production zero-pricing',last_verified_at=? WHERE provider_id='nvidia-nim'",(NOW,))
+claim_value=json.dumps({'classification':'free_tier_quota','scope':'NVIDIA-hosted NIM API development and unlimited prototyping','production_included':False},sort_keys=True)
+c.execute("""INSERT OR IGNORE INTO evidence_claims(subject_type,subject_key,field_name,value_json,value_type,evidence_source_id,evidence_capture_id,supporting_quote,observed_at,confidence,verification_method,source_priority,notes)
+VALUES('provider','nvidia-nim','access_classification',?,'json',?,?,'Get free access to NIM API endpoints for unlimited prototyping, powered by DGX Cloud.',?,'verified','official_page_quote',1,'Free developer/evaluation access, not genuine permanent zero-price production access')""",(claim_value,primary_sid,primary_cap,NOW))
+rows={x['model']:x for x in json.loads(RESULTS.read_text())['results']};pms=c.execute("SELECT provider_model_id,model_identifier FROM provider_models_v2 WHERE provider_id='nvidia-nim' AND endpoint_status='available'").fetchall()
+for pm in pms:
+ pmid,mid=pm['provider_model_id'],pm['model_identifier'];r=rows[mid]
+ existing=c.execute("SELECT access_offer_id FROM access_offers WHERE provider_model_id=? AND offer_type='free_tier_quota' AND ends_at IS NULL",(pmid,)).fetchone()
+ terms='Official NVIDIA free developer access to hosted NIM API endpoints for development, testing, and unlimited prototyping; production entitlement not included.'
+ if existing:c.execute("UPDATE access_offers SET last_observed_at=?,terms_summary=?,evidence_source_id=?,evidence_capture_id=?,confidence='verified',last_verified_at=? WHERE access_offer_id=?",(NOW,terms,primary_sid,primary_cap,NOW,existing[0]))
+ else:c.execute("""INSERT INTO access_offers(provider_model_id,offer_type,first_observed_at,last_observed_at,quota_json,requires_subscription,terms_summary,evidence_source_id,evidence_capture_id,confidence,last_verified_at)
+ VALUES(?,'free_tier_quota',?,?,?,0,?,?,?,'verified',?)""",(pmid,NOW,NOW,json.dumps({'type':'developer_evaluation','official_limit_description':'unlimited prototyping','production':False}),terms,primary_sid,primary_cap,NOW))
+ status=r['last_status'];tested=r['tested_at'];ok=status=='ok';colour=r['status_colour'];error=r.get('error_message');http=r.get('http_status');lat=r.get('latency_ms')
+ c.execute("""INSERT INTO free_model_probe_status(provider_model_id,provider_id,model_identifier,currently_free,last_tested_at,last_status,last_ok_at,last_failure_at,latency_ms,http_status,consecutive_failures,last_error_category,last_error_message,offer_type,offer_verified_at,runner_version,updated_at)
+ VALUES(?,'nvidia-nim',?,1,?,?,?,?,?,?,?,?,?,'free_tier_quota',?,'nvidia-nim-trial-probe/1.0',?)
+ ON CONFLICT(provider_model_id) DO UPDATE SET currently_free=1,last_tested_at=excluded.last_tested_at,last_status=excluded.last_status,last_ok_at=CASE WHEN excluded.last_status='ok' THEN excluded.last_tested_at ELSE free_model_probe_status.last_ok_at END,last_failure_at=CASE WHEN excluded.last_status='ok' THEN free_model_probe_status.last_failure_at ELSE excluded.last_tested_at END,latency_ms=excluded.latency_ms,http_status=excluded.http_status,consecutive_failures=CASE WHEN excluded.last_status='ok' THEN 0 ELSE free_model_probe_status.consecutive_failures+1 END,last_error_category=excluded.last_error_category,last_error_message=excluded.last_error_message,offer_type=excluded.offer_type,offer_verified_at=excluded.offer_verified_at,runner_version=excluded.runner_version,updated_at=excluded.updated_at""",
+ (pmid,mid,tested,status,tested if ok else None,None if ok else tested,lat,http,0 if ok else 1,status if not ok else None,error,NOW,tested))
+ day=tested[:10];c.execute("""INSERT INTO free_model_probe_daily(provider_model_id,test_date,first_tested_at,last_tested_at,attempts,ok_count,failure_count,last_status,min_latency_ms,max_latency_ms,total_latency_ms)
+ VALUES(?,?,?,?,1,?,?,?,?,?,?) ON CONFLICT(provider_model_id,test_date) DO UPDATE SET last_tested_at=excluded.last_tested_at,attempts=free_model_probe_daily.attempts+1,ok_count=free_model_probe_daily.ok_count+excluded.ok_count,failure_count=free_model_probe_daily.failure_count+excluded.failure_count,last_status=excluded.last_status,min_latency_ms=CASE WHEN free_model_probe_daily.min_latency_ms IS NULL THEN excluded.min_latency_ms ELSE min(free_model_probe_daily.min_latency_ms,excluded.min_latency_ms) END,max_latency_ms=max(COALESCE(free_model_probe_daily.max_latency_ms,0),COALESCE(excluded.max_latency_ms,0)),total_latency_ms=free_model_probe_daily.total_latency_ms+excluded.total_latency_ms""",(pmid,day,tested,tested,1 if ok else 0,0 if ok else 1,status,lat,lat,lat or 0))
+# Rebuild the active-free view with free-tier quota included.
+c.execute('DROP VIEW IF EXISTS currently_free_provider_models');c.execute("""CREATE VIEW currently_free_provider_models AS SELECT pm.*,ao.offer_type,ao.starts_at,ao.ends_at,ao.quota_json,ao.rate_limits_json,ao.last_verified_at AS offer_verified_at FROM provider_models_v2 pm JOIN access_offers ao ON ao.provider_model_id=pm.provider_model_id WHERE ao.offer_type IN ('genuine_zero_price','temporary_free_window','free_tier_quota') AND (ao.starts_at IS NULL OR datetime(ao.starts_at)<=datetime('now')) AND (ao.ends_at IS NULL OR datetime(ao.ends_at)>datetime('now')) AND pm.endpoint_status='available'""")
+# Rebuild derived health view after changing eligibility.
+c.executescript((ROOT/'free_model_health.sql').read_text());c.execute("DELETE FROM free_model_probe_daily WHERE test_date < date('now','-30 days')");c.commit()
+print(json.dumps({'provider':'nvidia-nim','classified_free_tier':len(pms),'health_results':len(rows),'green':sum(x['status_colour']=='green' for x in rows.values()),'orange':sum(x['status_colour']=='orange' for x in rows.values()),'red':sum(x['status_colour']=='red' for x in rows.values()),'evidence_sources':len(source_ids)+1},indent=2))
