@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh the model catalogue from official provider model endpoints.
+"""Refresh the AI model index from official provider model endpoints.
 
 Secrets are read only from environment variables and never written to disk.
 The database intentionally distinguishes free pricing from free-tier access.
@@ -22,7 +22,7 @@ NOW = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def get_json(url: str, env_var: str | None = None, headers: dict[str, str] | None = None):
-    h = {"User-Agent": "AZ-Labs-model-catalogue/1.0"}
+    h = {"User-Agent": "AZ-Labs-aimi/1.0"}
     if env_var and os.getenv(env_var):
         h["Authorization"] = f"Bearer {os.environ[env_var]}"
     h.update(headers or {})

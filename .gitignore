@@ -1,4 +1,6 @@
 # Personal/local catalogue state
+aimi.db
+ai_model_index.db
 model_catalogue.db
 free_models.db
 *.db-wal

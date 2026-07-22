@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parent
-DB=ROOT/'model_catalogue.db'
+DB=ROOT/'aimi.db'
 MIGRATION=ROOT/'free_model_health.sql'
 VERSION='free-model-health/1.0'
 PROMPT='Reply with exactly OK'

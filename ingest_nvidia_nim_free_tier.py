@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib,json,sqlite3
 from datetime import datetime,timezone
 from pathlib import Path
-ROOT=Path(__file__).resolve().parent;DB=ROOT/'model_catalogue.db';EVID=ROOT/'evidence'/'nvidia-nim';RESULTS=EVID/'nvidia-nim-trial-results-2026-07-21.json';NOW=datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+ROOT=Path(__file__).resolve().parent;DB=ROOT/'aimi.db';EVID=ROOT/'evidence'/'nvidia-nim';RESULTS=EVID/'nvidia-nim-trial-results-2026-07-21.json';NOW=datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 SOURCES=[
  ('https://developer.nvidia.com/nim','NVIDIA NIM for Developers',EVID/'nvidia-nim-for-developers.md'),
  ('https://build.nvidia.com/settings/api-keys','NVIDIA API Keys',EVID/'nvidia-api-keys.md'),

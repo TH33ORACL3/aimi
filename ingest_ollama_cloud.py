@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DB = ROOT / "model_catalogue.db"
+DB = ROOT / "aimi.db"
 PASS = {
     "nemotron-3-ultra", "minimax-m3", "gemma4:31b", "nemotron-3-super",
     "minimax-m2.5", "nemotron-3-nano:30b", "gpt-oss:20b", "gpt-oss:120b",
@@ -73,7 +73,7 @@ def main():
         result='passed' if mid in PASS else 'unauthorized'
         err=None if result=='passed' else '403 subscription required'
         c.execute("""INSERT INTO handshake_tests(provider_model_id,harness_id,tested_at,test_type,status,latency_ms,observed_features_json,sanitized_error,runner_version)
-        VALUES(?,NULL,?,'ollama_cloud_direct_chat',?,?,?,?,?)""",(pmid,now,result,timings[mid]['latency_ms'],json.dumps({'transport':'OLLAMA_HOST=https://ollama.com','exit_code':timings[mid]['exit_code'],'reply':'OK' if result=='passed' else None}),err,'model-catalogue-skill/1.0'))
+        VALUES(?,NULL,?,'ollama_cloud_direct_chat',?,?,?,?,?)""",(pmid,now,result,timings[mid]['latency_ms'],json.dumps({'transport':'OLLAMA_HOST=https://ollama.com','exit_code':timings[mid]['exit_code'],'reply':'OK' if result=='passed' else None}),err,'aimi/1.0'))
         if mid in SUBSCRIPTION:
             c.execute("""INSERT INTO access_offers(provider_model_id,offer_type,first_observed_at,last_observed_at,requires_subscription,terms_summary,evidence_source_id,evidence_capture_id,confidence,last_verified_at)
             VALUES(?,'subscription_included',?,?,1,'Runtime returned HTTP 403 and explicitly required an Ollama subscription',?,?, 'verified',?)

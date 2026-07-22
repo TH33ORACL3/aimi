@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json,re,sqlite3,subprocess,sys
 from pathlib import Path
-ROOT=Path(__file__).resolve().parent;DB=ROOT/'model_catalogue.db'
+ROOT=Path(__file__).resolve().parent;DB=ROOT/'aimi.db'
 c=sqlite3.connect(DB);c.row_factory=sqlite3.Row
 checks=[]
 def add(name,passed,value,expected=None):checks.append({'check':name,'passed':bool(passed),'value':value,'expected':expected})

@@ -61,6 +61,7 @@ HARNESS_KNOWN={
  'aside':('Aside Browser Agent','Browser Agent','aside',Path.home()/'.aside/u/0/models.json',Path.home()/'.aside/u/0/models.json'),
  'claude-code':('Claude Code','CLI Agent','claude',Path.home()/'.claude',Path.home()/'.claude'),
  'obsidian-warp':('Warp / Oz','CLI Agent',None,Path.home()/'.warp/settings.toml',Path.home()/'.warp/settings.toml'),
+ 'grok-build':('Grok Build / Grok CLI','CLI Agent','grok',Path.home()/'.grok/config.toml',Path.home()/'.grok/config.toml'),
 }
 
 def version(cmd):
@@ -271,6 +272,99 @@ def scan_warp(conn):
           (inst,'warp-custom' if custom else 'warp-hosted',mid,None if custom else mid,pos,src,NOW,NOW,json.dumps({'custom_uuid':custom,'source':'oz model list'})))
 
 
+def scan_grok(conn):
+    """Scan ~/.grok/config.toml for custom models and reasoning config.
+
+    Grok's config uses [model.<name>] sections with optional api_backend and
+    reasoning_effort. The Anthropic Messages API backend (api_backend = "messages")
+    enables thinking/reasoning for supported providers like DeepSeek.
+    """
+    path = Path.home() / '.grok/config.toml'
+    inst = installation(conn, 'grok-build', 'Grok Build / Grok CLI', 'CLI Agent', 'grok', path)
+    if not path.exists():
+        return
+    source(conn, path, 'Grok CLI custom model configuration', 'Grok Build')
+    try:
+        data = tomllib.loads(path.read_text())
+    except Exception:
+        return
+
+    default_model = data.get('models', {}).get('default')
+    global_reasoning = data.get('models', {}).get('default_reasoning_effort')
+
+    # Track what we've scanned so we can add available models for custom entries
+    scanned_models = set()
+
+    # In TOML, [model.<name>] sections are nested under the "model" key as a table.
+    # Each subsection (e.g. model.deepseek-v4-flash) is a key in the model table.
+    model_table = data.get('model', {})
+    if not isinstance(model_table, dict):
+        print('  Warning: [model] section is not a table')
+        return
+
+    for model_key, section in model_table.items():
+        if not isinstance(section, dict):
+            continue
+        full_key = 'model.' + model_key
+        mid = section.get('model')
+        if not mid:
+            continue
+
+        # Determine provider from context or base_url patterns
+        base_url = section.get('base_url', '')
+        if 'deepseek.com' in base_url:
+            pid = 'deepseek'
+        elif 'openai.com' in base_url:
+            pid = 'openai'
+        elif 'anthropic.com' in base_url:
+            pid = 'anthropic'
+        elif 'openrouter' in base_url:
+            pid = 'openrouter'
+        elif 'nvidia.com' in base_url:
+            pid = 'nvidia-nim'
+        elif 'opencode.ai' in base_url:
+            pid = 'opencode-zen'
+        else:
+            pid = 'custom'
+
+        # Determine reasoning level from per-model or global config
+        reasoning_level = section.get('reasoning_effort') or global_reasoning
+        api_backend = section.get('api_backend', 'chat_completions')
+
+        display_name = section.get('name') or mid
+        ctx = section.get('context_window')
+        max_tok = section.get('max_completion_tokens')
+
+        meta = {
+            'api_backend': api_backend,
+            'reasoning_effort': reasoning_level,
+            'base_url': base_url,
+            'config_key': model_key,
+            'has_extra_headers': bool(section.get('extra_headers')),
+        }
+
+        # Use the config key as the harness model identifier to distinguish
+        # different configurations of the same underlying model.
+        harness_mid = model_key
+        is_default = (harness_mid == default_model) or (model_key == default_model)
+
+        add_entry(
+            conn, inst, pid, harness_mid,
+            pos=len(scanned_models) + 1,
+            default=is_default,
+            reason=reasoning_level,
+            name=display_name,
+            ctx=ctx,
+            out=max_tok,
+            src=path,
+            meta=meta,
+        )
+        scanned_models.add(model_key)
+
+        # Also register as available model
+        add_available(conn, inst, pid, harness_mid, path, len(scanned_models), display_name, meta)
+
+
 def scan_credentials(conn):
     mapping={'OPENAI_API_KEY':'openai','ANTHROPIC_API_KEY':'anthropic','GEMINI_API_KEY':'gemini','MISTRAL_API_KEY':'mistral','DEEPSEEK_API_KEY':'deepseek','NVIDIA_API_KEY':'nvidia-nim','OPENROUTER_API_KEY':'openrouter','OPENCODE_API_KEY':'opencode-zen','HF_TOKEN':'huggingface','GROQ_API_KEY':'groq','XAI_API_KEY':'xai','CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS':'cloudflare-ai'}
     for env,pid in mapping.items():
@@ -303,7 +397,7 @@ def main():
     for hid,(name,cat,cmd,cfg,_) in HARNESS_KNOWN.items(): installation(conn,hid,name,cat,cmd,cfg)
     # Preserve historical rows but mark them inactive unless observed again in this scan.
     conn.execute("UPDATE harness_model_entries SET enabled=0 WHERE installation_id IN (SELECT installation_id FROM harness_installations WHERE machine_id=?)",(MACHINE,))
-    scan_pi(conn); scan_droid(conn); scan_opencode(conn); scan_codex(conn); scan_cline(conn); scan_aside(conn); scan_vibe(conn); scan_antigravity(conn); scan_warp(conn); scan_credentials(conn); preferred_pi_order(conn)
+    scan_pi(conn); scan_droid(conn); scan_opencode(conn); scan_codex(conn); scan_cline(conn); scan_aside(conn); scan_vibe(conn); scan_antigravity(conn); scan_grok(conn); scan_warp(conn); scan_credentials(conn); preferred_pi_order(conn)
     conn.commit()
     print(json.dumps({'harnesses':conn.execute('SELECT COUNT(*) FROM harnesses').fetchone()[0],'installations':conn.execute('SELECT COUNT(*) FROM harness_installations').fetchone()[0],'configured_models':conn.execute('SELECT COUNT(*) FROM harness_model_entries').fetchone()[0],'rankings':conn.execute('SELECT COUNT(*) FROM user_rankings').fetchone()[0],'credential_presence_records':conn.execute('SELECT COUNT(*) FROM credential_inventory').fetchone()[0]},indent=2))
 if __name__=='__main__':main()

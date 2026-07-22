@@ -3,7 +3,7 @@
 from __future__ import annotations
 import re,sqlite3,subprocess,sys
 from pathlib import Path
-ROOT=Path(__file__).resolve().parent; SRC=ROOT/'model_catalogue.db'; DIST=ROOT/'dist'; OUT=DIST/'model_catalogue.public.db'
+ROOT=Path(__file__).resolve().parent; SRC=ROOT/'aimi.db'; DIST=ROOT/'dist'; OUT=DIST/'aimi.public.db'
 PATTERNS={
  'home_path':rb'/Users/TH33_ORACL3',
  'openai_key':rb'sk-(?:proj-)?[A-Za-z0-9_-]{20,}',

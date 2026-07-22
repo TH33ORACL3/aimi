@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parent
-DB=ROOT/'model_catalogue.db'
+DB=ROOT/'aimi.db'
 EVIDENCE=ROOT/'evidence'/'warp'
 BIN=Path('/Applications/Warp.app/Contents/MacOS/stable')
 NOW=datetime.now(timezone.utc).replace(microsecond=0).isoformat()

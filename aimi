@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Human- and agent-friendly interface to the personal model catalogue."""
+"""Human- and agent-friendly interface to the personal AI model index."""
 from __future__ import annotations
 import argparse,json,sqlite3,sys,shutil,subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-ROOT=Path(__file__).resolve().parent; DB=ROOT/'model_catalogue.db'; HOME=Path.home()
+ROOT=Path(__file__).resolve().parent; DB=ROOT/'aimi.db'; HOME=Path.home()
 PI_ALIAS={'opencode-zen':'opencode','nvidia-nim':'nvidia','cloudflare-ai':'cloudflare-workers-ai'}
 
 def refresh_local_harnesses():
@@ -83,7 +83,14 @@ def route(c,a):
  row=c.execute("""SELECT pm.*,p.display_name provider_name,p.api_style,p.base_url,p.auth_env_var,cm.canonical_name,cm.developer,cm.family FROM provider_models_v2 pm JOIN providers p USING(provider_id) LEFT JOIN canonical_models cm USING(canonical_model_id) WHERE pm.provider_id=? AND pm.model_identifier=?""",(a.provider,a.model)).fetchone()
  if not row:raise SystemExit('Provider/model route not found')
  offers=[dict(x) for x in c.execute('SELECT offer_type,starts_at,ends_at,input_price_per_million_usd,output_price_per_million_usd,quota_json,rate_limits_json,confidence,last_verified_at FROM access_offers WHERE provider_model_id=? ORDER BY last_verified_at DESC',(row['provider_model_id'],))]
- out=dict(row);out['offers']=offers;out['last_test']=_latest_test(c,row['provider_model_id']);print(json.dumps(out,indent=2,default=str))
+ out=dict(row);out['offers']=offers;out['last_test']=_latest_test(c,row['provider_model_id'])
+ meta=_decode_json(out.get('provider_metadata_json'))
+ if meta:
+  out['reasoning_efforts']=meta.get('reasoning_efforts')
+  out['thinking_api']=meta.get('thinking_api')
+ # Remove raw metadata json from output to avoid duplication
+ out.pop('provider_metadata_json',None)
+ print(json.dumps(out,indent=2,default=str))
 def changes(c,a):
  q="""SELECT ec.endpoint_change_id,ec.provider_id,ec.change_type,ec.model_identifier,ec.detected_at,ec.reviewed,ec.review_notes FROM endpoint_changes ec WHERE (? IS NULL OR ec.provider_id=?) AND (? OR ec.reviewed=0) ORDER BY datetime(ec.detected_at) DESC LIMIT ?""";rows_json(c.execute(q,(a.provider,a.provider,int(a.all),a.limit)).fetchall())
 def monitor_status(c,_):
@@ -170,6 +177,7 @@ def where(c,a):
         pm.endpoint_last_seen_at,pm.context_window_tokens,pm.max_input_tokens,
         pm.max_output_tokens,pm.reasoning,pm.tools,pm.function_calling,
         pm.structured_outputs,pm.streaming,pm.input_modalities_json,pm.output_modalities_json,
+        pm.provider_metadata_json,
         p.base_url,p.api_style,p.official_models_endpoint,p.last_verified_at provider_last_verified_at,
         cm.canonical_name,cm.developer,cm.family
       FROM provider_models_v2 pm JOIN providers p USING(provider_id)
@@ -220,26 +228,47 @@ def where(c,a):
     for item in matched:
         item['offers']=offers.get(item['provider_model_id'],[])
         item['last_test']=tests.get(item['provider_model_id'])
+        meta=_decode_json(item.pop('provider_metadata_json',None)) or {}
+        item['reasoning_efforts']=meta.get('reasoning_efforts') if meta else None
+        item['thinking_api']=meta.get('thinking_api') if meta else None
         item.pop('provider_model_id',None)
 
     harness=[]
     if not getattr(a,'no_harnesses',False):
         cached=c.execute("""SELECT h.harness_id,e.position,e.configured_provider_name provider_name,
-            e.configured_model_identifier model_identifier,e.display_name,e.is_default,e.enabled,
+            e.configured_model_identifier model_identifier,e.display_name,e.is_default,e.enabled,e.reasoning_level,
             'configured' record_type,e.config_source_path source_path,i.last_scanned_at
           FROM harness_model_entries e JOIN harness_installations i USING(installation_id)
           JOIN harnesses h USING(harness_id)
           WHERE e.enabled=1
           UNION ALL
-          SELECT h.harness_id,a.position,a.provider_name,a.model_identifier,a.display_name,0,1,
+          SELECT h.harness_id,a.position,a.provider_name,a.model_identifier,a.display_name,0,1,NULL,
             'available',a.source_path,i.last_scanned_at
           FROM harness_available_model_entries a JOIN harness_installations i USING(installation_id)
           JOIN harnesses h USING(harness_id)
           WHERE a.last_observed_at=i.last_scanned_at
           ORDER BY 1,8,2""").fetchall()
+        # Collect harness thinking configs for matched providers
+        all_provider_ids = {item['provider_id'] for item in matched}
+        if all_provider_ids:
+            placeholders = ','.join('?' * len(all_provider_ids))
+            thinking_configs = {
+                (row['harness_id'], row['provider_id']): _decode_json(row['config_schema_json'])
+                for row in c.execute(
+                    f"""SELECT harness_id, provider_id, config_schema_json FROM harness_provider_support
+                    WHERE provider_id IN ({placeholders}) AND config_schema_json IS NOT NULL""",
+                    list(all_provider_ids),
+                )
+            }
+        else:
+            thinking_configs = {}
         for row in cached:
             if _matches_model(a.model,row['provider_name'],row['model_identifier'],row['display_name']):
-                harness.append(dict(row))
+                entry = dict(row)
+                tc = thinking_configs.get((row['harness_id'], row['provider_name']))
+                if tc and tc.get('thinking'):
+                    entry['reasoning_config'] = tc['thinking']
+                harness.append(entry)
     provider_ids=sorted({item['provider_id'] for item in matched})
     monitoring=[]
     if provider_ids:
@@ -294,7 +323,7 @@ def pi_provider_fragment(c,pid,mid):
  return {k:v for k,v in provider.items() if v is not None}
 def pi_fragment(c,a):print(json.dumps({'providers':{a.provider:pi_provider_fragment(c,a.provider,a.model)}},indent=2))
 def write_pi_settings(path,d):
- backup=path.with_name(path.name+'.bak.modelctl-'+datetime.now().strftime('%Y%m%d-%H%M%S'));shutil.copy2(path,backup);tmp=path.with_suffix('.json.tmp');tmp.write_text(json.dumps(d,indent=2)+'\n');json.loads(tmp.read_text());tmp.replace(path);return backup
+ backup=path.with_name(path.name+'.bak.aimi-'+datetime.now().strftime('%Y%m%d-%H%M%S'));shutil.copy2(path,backup);tmp=path.with_suffix('.json.tmp');tmp.write_text(json.dumps(d,indent=2)+'\n');json.loads(tmp.read_text());tmp.replace(path);return backup
 def register_pi_model(c,provider,model,apply):
  path=HOME/'.pi/agent/models.json';d=json.loads(path.read_text()) if path.exists() else {'providers':{}};fragment=pi_provider_fragment(c,provider,model);existing=d.setdefault('providers',{}).get(provider,{})
  models=[x for x in existing.get('models',[]) if x.get('id')!=model]+fragment['models'];merged={**fragment,**existing,'models':models};d['providers'][provider]=merged
@@ -321,8 +350,121 @@ def pi_remove(c,a):
  out={'entry':entry,'before_position':before.index(entry)+1,'apply':a.apply}
  if a.apply:out['backup']=str(write_pi_settings(path,d))
  print(json.dumps(out,indent=2))
+def grok_config(c,a):
+    """Generate a Grok config.toml [model.*] block with thinking enabled for a provider/model route."""
+    row = c.execute("""SELECT pm.provider_id, pm.model_identifier, pm.display_name, pm.reasoning,
+        pm.context_window_tokens, pm.max_output_tokens, pm.provider_metadata_json,
+        p.base_url, p.api_style, p.auth_env_var
+      FROM provider_models_v2 pm JOIN providers p USING(provider_id)
+      WHERE pm.provider_id=? AND pm.model_identifier=?""", (a.provider, a.model)).fetchone()
+    if not row:
+        raise SystemExit(f'Provider/model route not found: {a.provider}/{a.model}')
+    meta = _decode_json(row['provider_metadata_json']) or {}
+    reasoning = bool(row['reasoning'])
+    if not reasoning and not a.force:
+        print(json.dumps({'warning': f'{a.provider}/{a.model} has reasoning=NULL in the database; thinking may not be supported', 'force_with': '--force'}, indent=2))
+
+    # Look up harness_provider_support for grok-build + this provider
+    hps = c.execute("""SELECT config_schema_json, compatibility_notes FROM harness_provider_support
+        WHERE harness_id='grok-build' AND provider_id=?""", (a.provider,)).fetchone()
+
+    config_key = f'{a.provider}-{a.model}'.replace('/','-').replace('.','-').replace('@','')
+    display_name = row['display_name'] or a.model
+    ctx = row['context_window_tokens'] or 128000
+    max_tok = row['max_output_tokens'] or 8192
+    provider_env_key = row['auth_env_var'] or 'XAI_API_KEY'
+
+    if hps and reasoning:
+        schema = _decode_json(hps['config_schema_json']) or {}
+        tc = schema.get('thinking', {})
+        api_backend = tc.get('api_backend', 'chat_completions')
+        extra_headers = tc.get('extra_headers')
+        effort = tc.get('reasoning_efforts', ['high'])[-1]  # default to highest effort
+        notes = tc.get('notes', '')
+
+        # Use the base_url from the schema if specified, otherwise derive from provider base_url
+        # If the schema specifies a base_url_template, use it; otherwise use the provider's base_url
+        base_url_from_schema = tc.get('base_url')
+        if base_url_from_schema:
+            # Template supports {base_url} placeholder for the provider's base URL
+            base = base_url_from_schema.replace('{base_url}', row['base_url'] or '')
+        else:
+            base = row['base_url'] or ''
+
+        add_headers = ''
+        if extra_headers:
+            headers_str = ', '.join(f'"{k}" = "{v}"' for k, v in extra_headers.items())
+            add_headers = f'\nextra_headers = {{ {headers_str} }}'
+
+        config_str = '\n'.join([
+            f'# Grok CLI config for {a.provider}/{a.model} with thinking enabled',
+            f'# Generated by aimi grok-config on {datetime.now(timezone.utc).strftime("%Y-%m-%d")}',
+            f'# {notes}',
+            f'[model.{config_key}]',
+            f'model = "{a.model}"',
+            f'base_url = "{base}"',
+            f'name = "{display_name} (Thinking)"',
+            f'description = "{display_name} via {api_backend} backend with thinking"',
+            f'api_backend = "{api_backend}"',
+            f'env_key = "{provider_env_key}"',
+            f'context_window = {ctx}',
+            f'max_completion_tokens = {max_tok}',
+            f'temperature = 0.7',
+            f'reasoning_effort = "{effort}"',
+        ]) + add_headers
+
+        result = {
+            'provider': a.provider,
+            'model': a.model,
+            'config_key': config_key,
+            'thinking_enabled': reasoning,
+            'config_toml': config_str,
+            'api_backend': api_backend,
+            'harness_support_notes': hps['compatibility_notes'],
+        }
+    else:
+        # Fallback: basic config without explicit thinking support from harness_provider_support
+        extra_lines = []
+        if reasoning:
+            efforts = meta.get('reasoning_efforts', ['low', 'medium', 'high'])
+            highest = efforts[-1] if efforts else 'high'
+            extra_lines.append(f'# This model supports reasoning (efforts: {", ".join(efforts)})')
+            extra_lines.append(f'reasoning_effort = "{highest}"')
+
+        toml_lines = [
+            f'# Grok CLI config for {a.provider}/{a.model}',
+            f'[model.{config_key}]',
+            f'model = "{a.model}"',
+            f'base_url = "{row["base_url"]}"',
+            f'name = "{display_name}{" (Thinking)" if reasoning else ""}"',
+            f'env_key = "{provider_env_key}"',
+            f'context_window = {ctx}',
+            f'max_completion_tokens = {max_tok}',
+            f'temperature = 0.7',
+        ]
+        if extra_lines:
+            # Insert comment after the header comment, and reasoning_effort after temperature
+            for line in extra_lines:
+                if line.startswith('#'):
+                    toml_lines.insert(1, line)
+                else:
+                    toml_lines.append(line)
+
+        config_str = '\n'.join(toml_lines)
+        result = {
+            'provider': a.provider,
+            'model': a.model,
+            'config_key': config_key,
+            'thinking_enabled': reasoning,
+            'config_toml': config_str,
+            'notes': 'No harness_provider_support found for grok-build + this provider. Config may need manual adjustment.',
+        }
+
+    print(json.dumps(result, indent=2, default=str))
+
+
 def main():
- p=argparse.ArgumentParser(prog='modelctl');s=p.add_subparsers(dest='cmd',required=True)
+ p=argparse.ArgumentParser(prog='aimi');s=p.add_subparsers(dest='cmd',required=True)
  s.add_parser('summary').set_defaults(fn=summary)
  x=s.add_parser('free');x.add_argument('--provider');x.set_defaults(fn=free)
  x=s.add_parser('latest-free');x.add_argument('--provider',default='openrouter');x.add_argument('--limit',type=int,default=10);x.set_defaults(fn=latest_free)
@@ -336,6 +478,7 @@ def main():
  x=s.add_parser('maker-models');x.add_argument('maker');x.set_defaults(fn=maker_models)
  x=s.add_parser('warp-models');x.add_argument('--custom',action='store_true');x.set_defaults(fn=warp_models)
  x=s.add_parser('route');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=route)
+ x=s.add_parser('grok-config');x.add_argument('provider');x.add_argument('model');x.add_argument('--force',action='store_true',help='Generate config even if reasoning is not confirmed in the database');x.set_defaults(fn=grok_config)
  x=s.add_parser('changes');x.add_argument('--provider');x.add_argument('--all',action='store_true');x.add_argument('--limit',type=int,default=50);x.set_defaults(fn=changes)
  s.add_parser('monitor-status').set_defaults(fn=monitor_status)
  s.add_parser('pi-order').set_defaults(fn=pi_order)

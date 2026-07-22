@@ -5,7 +5,7 @@ from datetime import datetime,timezone
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parent
-DB=ROOT/'model_catalogue.db'
+DB=ROOT/'aimi.db'
 RESEARCH=Path('/Users/TH33_ORACL3/AZ Labs/4 - Research/2026-07-21_ai-subscriptions-model-catalogue')
 NOW=datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 WARP_BIN=Path('/Applications/Warp.app/Contents/MacOS/stable')
