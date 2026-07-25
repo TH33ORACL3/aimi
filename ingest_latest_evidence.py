@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib,json,sqlite3
 from datetime import datetime,timezone
 from pathlib import Path
-ROOT=Path(__file__).resolve().parent; DB=ROOT/'free_models.db'; NOW=datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+ROOT=Path(__file__).resolve().parent; DB=ROOT/'aimi.db'; NOW=datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 RELEASES=[
  {'slug':'kimi-k2.7-code','developer':'Moonshot AI','family':'Kimi','name':'Kimi K2.7 Code','weights':'open','license':'unknown','url':'https://x.com/Kimi_Moonshot/status/2065377579130142937','path':ROOT/'evidence/x/kimi-k2.7-code.md','time':'2026-06-12T10:16:02Z','events':['announcement','general_release','api_availability','weights_release'],'quote':'Kimi-K2.7-Code, our latest coding model, is now released and open-sourced! Available today via Kimi API and Kimi Code.','links':[('opencode-go','kimi-k2.7-code'),('cloudflare-ai','@cf/moonshotai/kimi-k2.7-code')]},
  {'slug':'glm-5.2','developer':'Z.ai','family':'GLM','name':'GLM-5.2','weights':'open','license':'MIT','url':'https://x.com/Zai_org/status/2066938937344495629','path':ROOT/'evidence/x/glm-5.2.md','time':'2026-06-16T17:40:19Z','events':['announcement','general_release','weights_release'],'quote':'Introducing GLM-5.2: Frontier Intelligence, Open Weights. Strong long-horizon capabilities with a 1M context window. MIT-licensed open weights.','links':[('opencode-go','glm-5.2'),('nvidia-nim','z-ai/glm-5.2'),('cloudflare-ai','@cf/zai-org/glm-5.2')]},

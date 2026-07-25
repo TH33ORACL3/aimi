@@ -30,13 +30,44 @@ AIMI answers a practical question:
 
 It keeps canonical models separate from provider routes, records evidence at field level, tracks access semantics such as genuinely free and subscription-included, and monitors official provider endpoints for changes.
 
-## Quick start
+## Installation (agent-first, macOS, Windows, and Linux)
 
-```bash
-cd "$HOME/AZ Labs/2 - Testing/AIMI"
-./aimi summary
-./aimi where deepseek-v4-flash
-./aimi recommend --task coding --free
+A human does not need to install AIMI manually. An agent should clone or copy this repository, then run the portable installer from the repository root:
+
+```text
+python install.py
+```
+
+Use `py install.py` on Windows when `python` is not the registered command. The installer:
+
+1. Requires Python 3.11 or newer.
+2. Creates the private local `aimi.db` from `schema_v2.sql` when it does not exist.
+3. Installs the repository's bundled skill to `~/.agents/skills/model-catalogue/` using the platform's home directory.
+4. Prints the exact database, skill, and CLI paths after completion.
+
+The installer has no third-party Python dependencies. It uses only the Python standard library and SQLite. API keys are optional for local inspection; provider refreshes and health checks require the relevant environment variables.
+
+Verify the installation:
+
+```text
+python aimi summary
+python validate_catalogue.py
+```
+
+On Windows, use `py` instead of `python` if required. The Python CLI is the portable entry point on every operating system. The optional `skills/scripts/catalogue` wrapper is provided for POSIX shells only; Windows agents should invoke `python aimi` and the Python maintenance scripts directly.
+
+### Platform notes
+
+- **Windows:** Python 3.11+, SQLite via Python, and PowerShell or another agent shell are sufficient for the core CLI, database, validation, export, and catalogue scripts. Windows-specific harness paths are detected when available; missing harnesses are reported rather than invented.
+- **macOS/Linux:** Python 3.11+ is sufficient for the core CLI. `skills/scripts/catalogue` can be used from a POSIX shell. `hyperfine`, `zsh`, and Hermes are optional integrations used only by the relevant monitoring workflows.
+- **Provider access:** install the provider's own CLI or credentials only when you want to scan or test that provider. AIMI does not silently install agent harnesses or create API keys.
+
+### Quick start
+
+```text
+python aimi summary
+python aimi where deepseek-v4-flash
+python aimi recommend --task coding --free
 ```
 
 The main CLI is called `aimi`. It can search routes, compare providers, inspect harness configuration, show free-model health, and manage Pi model ordering.
