@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib,json,os,sqlite3,urllib.request,urllib.error
 from datetime import datetime,timezone
 from pathlib import Path
-ROOT=Path(__file__).resolve().parent; DB=ROOT/'free_models.db'; SNAP=ROOT/'snapshots'/'monitor'; SNAP.mkdir(parents=True,exist_ok=True)
+ROOT=Path(__file__).resolve().parent; DB=ROOT/'aimi.db'; SNAP=ROOT/'snapshots'/'monitor'; SNAP.mkdir(parents=True,exist_ok=True)
 NOW=datetime.now(timezone.utc).replace(microsecond=0).isoformat(); STAMP=NOW.replace(':','').replace('+00:00','Z')
 CONFIG={
  'openrouter':('https://openrouter.ai/api/v1/models','OPENROUTER_API_KEY','data'),

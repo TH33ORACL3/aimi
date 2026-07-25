@@ -1,0 +1,56 @@
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+AIMI="$PROJECT/aimi"
+command_name="${1:-summary}"
+if [ "$#" -gt 0 ]; then shift; fi
+case "$command_name" in
+  monitor)
+    exec zsh -lc 'source ~/.zshrc >/dev/null 2>&1; cd "$1"; exec python3 monitor_endpoints.py' -- "$PROJECT"
+    ;;
+  scan)
+    cd "$PROJECT"
+    exec python3 scan_local_harnesses.py "$@"
+    ;;
+  validate)
+    cd "$PROJECT"
+    exec python3 validate_catalogue.py "$@"
+    ;;
+  export)
+    cd "$PROJECT"
+    exec python3 export_sanitized.py "$@"
+    ;;
+  refresh)
+    exec zsh -lc 'source ~/.zshrc >/dev/null 2>&1; cd "$1"; exec python3 refresh_catalog.py' -- "$PROJECT"
+    ;;
+  ingest-latest)
+    cd "$PROJECT"
+    exec python3 ingest_latest_evidence.py "$@"
+    ;;
+  ingest-frontier)
+    cd "$PROJECT"
+    exec python3 ingest_frontier_evidence.py "$@"
+    ;;
+  ingest-subscriptions)
+    cd "$PROJECT"
+    exec python3 ingest_subscriptions.py "$@"
+    ;;
+  record-warp-tests)
+    cd "$PROJECT"
+    exec python3 record_warp_tests.py "$@"
+    ;;
+  cron-runs)
+    exec hermes cron runs 454c1f94d5fe
+    ;;
+  db-path)
+    printf '%s\n' "$PROJECT/aimi.db"
+    ;;
+  project-path)
+    printf '%s\n' "$PROJECT"
+    ;;
+  *)
+    cd "$PROJECT"
+    exec python3 "$AIMI" "$command_name" "$@"
+    ;;
+esac

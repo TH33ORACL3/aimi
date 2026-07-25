@@ -43,6 +43,27 @@ def free_health_summary(c,_):
  row=c.execute("""SELECT COUNT(*) active_free_routes,SUM(CASE WHEN status_colour='green' THEN 1 ELSE 0 END) green_ok,SUM(CASE WHEN status_colour='orange' THEN 1 ELSE 0 END) orange_rate_limited,SUM(CASE WHEN status_colour='red' THEN 1 ELSE 0 END) red_failed,SUM(CASE WHEN status_colour='untested' THEN 1 ELSE 0 END) untested,MIN(last_tested_at) oldest_last_tested_at,MAX(last_tested_at) newest_last_tested_at FROM current_free_model_health""").fetchone();daily=c.execute("SELECT COUNT(*) retained_daily_rows,MIN(test_date) oldest_day,MAX(test_date) newest_day FROM free_model_probe_daily").fetchone();out=dict(row);out['retention']=dict(daily);print(json.dumps(out,indent=2,default=str))
 def latest(c,a):
  q="""SELECT canonical_name,event_type,event_time,time_precision,provider_id,model_identifier,evidence_url,confidence FROM latest_verified_model_events ORDER BY datetime(event_time) DESC LIMIT ?""";rows_json(c.execute(q,(a.limit,)).fetchall())
+
+def timeline(c,a):
+    """Fast release/availability timeline query for an arbitrary date range."""
+    params=[a.since]
+    end_clause=''
+    if a.until:
+        end_clause=' AND date(e.event_time) <= date(?)'
+        params.append(a.until)
+    q=f"""SELECT COALESCE(cm.canonical_name, pm.display_name, pm.model_identifier) model,
+        COALESCE(cm.developer, '') developer, e.event_type, e.event_time, e.time_precision,
+        COALESCE(p.provider_id, '') provider_id, COALESCE(pm.model_identifier, '') model_identifier,
+        es.url evidence_url, e.confidence
+        FROM model_events e
+        LEFT JOIN canonical_models cm ON cm.canonical_model_id=e.canonical_model_id
+        LEFT JOIN provider_models_v2 pm ON pm.provider_model_id=e.provider_model_id
+        LEFT JOIN providers p ON p.provider_id=pm.provider_id
+        JOIN evidence_sources es ON es.evidence_source_id=e.evidence_source_id
+        WHERE date(e.event_time) >= date(?) {end_clause}
+          AND e.event_type IN ('announcement','preview_release','general_release','api_availability','model_card_publication','weights_release','endpoint_first_seen')
+        ORDER BY date(e.event_time) DESC, e.event_type, model"""
+    rows_json(c.execute(q,params).fetchall())
 def providers(c,_):rows_json(c.execute('SELECT provider_id,display_name,api_style,base_url,auth_env_var,pricing_policy,free_definition,last_verified_at FROM providers ORDER BY display_name').fetchall())
 def subscriptions(c,a):
  q="""SELECT sp.product_slug,sp.vendor,sp.display_name,sp.tier_name,sp.product_type,sp.billing_model,sp.monthly_price,sp.currency,sp.product_status,sp.last_verified_at,sp.confidence,
@@ -471,6 +492,7 @@ def main():
  x=s.add_parser('free-health');x.add_argument('--provider');x.add_argument('--failures-only',action='store_true');x.set_defaults(fn=free_health)
  s.add_parser('free-health-summary').set_defaults(fn=free_health_summary)
  x=s.add_parser('latest');x.add_argument('--limit',type=int,default=20);x.set_defaults(fn=latest)
+ x=s.add_parser('timeline',help='Release and endpoint timeline for a date range');x.add_argument('--since',required=True,help='ISO date, e.g. 2026-07-18');x.add_argument('--until',help='ISO date, inclusive');x.set_defaults(fn=timeline)
  s.add_parser('providers').set_defaults(fn=providers)
  x=s.add_parser('subscriptions');x.add_argument('--mine',action='store_true');x.set_defaults(fn=subscriptions)
  x=s.add_parser('subscription');x.add_argument('product');x.set_defaults(fn=subscription)

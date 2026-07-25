@@ -47,7 +47,7 @@
       "check": "pi_order_matches_durable_preference",
       "passed": false,
       "value": {
-        "current": 31,
+        "current": 32,
         "preferred": 36
       },
       "expected": "exact match"
@@ -55,13 +55,13 @@
     {
       "check": "endpoint_changes_reviewed",
       "passed": false,
-      "value": 40,
+      "value": 1052,
       "expected": 0
     },
     {
       "check": "monitoring_targets_healthy",
-      "passed": true,
-      "value": 0,
+      "passed": false,
+      "value": 1,
       "expected": 0
     },
     {
@@ -90,16 +90,16 @@
     }
   ],
   "metrics": {
-    "provider_routes": 850,
-    "canonical_models": 11,
-    "active_free_routes": 163,
-    "verified_events": 66,
+    "provider_routes": 884,
+    "canonical_models": 753,
+    "active_free_routes": 164,
+    "verified_events": 883,
     "evidence_sources": 52,
     "claims": 87,
     "installed_harnesses": 12,
-    "free_health_green": 27,
-    "free_health_orange": 0,
-    "free_health_red": 114,
-    "free_health_daily_rows": 163
+    "free_health_green": 43,
+    "free_health_orange": 3,
+    "free_health_red": 96,
+    "free_health_daily_rows": 210
   }
 }

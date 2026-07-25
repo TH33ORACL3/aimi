@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DB = ROOT / "free_models.db"
+DB = ROOT / "aimi.db"
 SNAPSHOTS = ROOT / "snapshots"
 NOW = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
