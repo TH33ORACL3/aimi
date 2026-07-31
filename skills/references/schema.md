@@ -96,6 +96,7 @@ Legacy tables remain because earlier tools depend on them, including the histori
 | Fact | Best evidence |
 |---|---|
 | Current exact model ID/availability | Official endpoint plus successful handshake |
+| Provider-supplied context, limits, capabilities, aliases and metadata | Full captured official endpoint payload, normalized into `provider_models_v2` and `provider_model_aliases` |
 | API price/free state | Official pricing/models endpoint and pricing page |
 | Release/announcement date | Dated official launch post, changelog or announcement |
 | Context/output/capabilities | Official model documentation/endpoint, then runtime test |

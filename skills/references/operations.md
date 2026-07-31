@@ -19,9 +19,9 @@ The wrapper resolves the canonical project and keeps provider credentials out of
 | `catalogue free-health-summary` | Count current OK/failure/untested free routes and retained daily rows |
 | `catalogue free-health [--failures-only]` | Last-tested, last-OK, status, latency and bounded health details |
 | `catalogue latest` | Verified canonical model events |
-| `catalogue route PROVIDER MODEL` | Complete route, offer details, and latest test outcome/result |
+| `catalogue route PROVIDER MODEL` | Complete route, normalized capabilities, aliases, full sanitised endpoint metadata, offer details, and latest test outcome/result |
 | `catalogue grok-config PROVIDER MODEL` | Generate a Grok CLI `config.toml` `[model.*]` block with thinking enabled; uses `harness_provider_support` to apply the correct `api_backend = "messages"` + `reasoning_effort` + `extra_headers` pattern. Requires `reasoning=1` in the provider route, or `--force` to override. |
-| `catalogue where MODEL` | Fast all-provider lookup: every available provider route, access offers, latest test outcome/result, cached harness matches, freshness metadata, and `reasoning_efforts`/`thinking_api` from `provider_metadata_json` |
+| `catalogue where MODEL` | Fast all-provider lookup: every available provider route, normalized capabilities, aliases, full sanitised endpoint metadata, access offers, latest test outcome/result, cached harness matches, and freshness metadata |
 | `catalogue where MODEL --refresh-harnesses` | Same lookup after refreshing local harness files; use only when current harness config is specifically required |
 | `catalogue where MODEL --no-harnesses` | Provider routes/offers/freshness only |
 | `catalogue recommend` | Task/free/provider-filtered candidates |
@@ -34,7 +34,7 @@ The wrapper resolves the canonical project and keeps provider credentials out of
 | `catalogue harness-models ID` | Live configured and harness-listed models, with `record_type` and source path |
 | `catalogue harness-models ID --kind configured` | Live configured/selected models only |
 | `catalogue harness-models ID --kind available` | Live models listed by the harness's own registry/cache only |
-| `catalogue monitor` | Poll nine official endpoints and persist normalized diffs |
+| `catalogue monitor` | Poll ten official endpoints, retain full sanitised per-model metadata, update normalized capabilities and aliases, and persist evidence-linked diffs |
 | `catalogue monitor-status` | Target health |
 | `catalogue changes` | Unreviewed endpoint changes by default |
 | `catalogue scan` | Refresh safe local harness observations; never copies secret values |
@@ -42,7 +42,7 @@ The wrapper resolves the canonical project and keeps provider credentials out of
 | `catalogue record-warp-tests` | Persist completed Warp smoke results and interrupted-batch evidence |
 | `catalogue validate` | Full catalogue audit |
 | `catalogue export` | Sanitized public SQLite export |
-| `catalogue cron-runs` | Hermes endpoint-monitor run history |
+| `catalogue cron-runs` | Hermes model-discovery and Telegram-notification run history |
 
 Run `catalogue <command> --help` for arguments.
 

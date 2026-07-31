@@ -28,6 +28,15 @@ dist/*.json
 task_plan.md
 findings.md
 progress.md
+*-task_plan.md
+*-findings.md
+*-progress.md
+research.md
+
+# Local tool state
+.playwright-cli/
+.omo/
+.learnings/
 
 # Python/macOS
 __pycache__/

@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS provider_models_v2 (
   canonical_model_id INTEGER REFERENCES canonical_models(canonical_model_id),
   model_identifier TEXT NOT NULL,
   display_name TEXT,
+  description TEXT,
+  provider_created_at TEXT,
   provider_alias_of INTEGER REFERENCES provider_models_v2(provider_model_id),
   endpoint_status TEXT NOT NULL DEFAULT 'available' CHECK(endpoint_status IN ('available','unavailable','deprecated','removed','unknown')),
   endpoint_first_seen_at TEXT NOT NULL,
@@ -47,6 +49,17 @@ CREATE TABLE IF NOT EXISTS provider_models_v2 (
   provider_metadata_json TEXT,
   source_snapshot_id INTEGER REFERENCES model_sources(source_id),
   UNIQUE(provider_id, model_identifier)
+);
+
+CREATE TABLE IF NOT EXISTS provider_model_aliases (
+  provider_model_alias_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_model_id INTEGER NOT NULL REFERENCES provider_models_v2(provider_model_id) ON DELETE CASCADE,
+  alias TEXT NOT NULL,
+  alias_type TEXT NOT NULL DEFAULT 'provider_alias',
+  first_observed_at TEXT NOT NULL,
+  last_observed_at TEXT NOT NULL,
+  evidence_capture_id INTEGER REFERENCES evidence_captures(evidence_capture_id),
+  UNIQUE(provider_model_id, alias)
 );
 
 CREATE TABLE IF NOT EXISTS evidence_sources (
@@ -444,6 +457,7 @@ WHERE provider IN (SELECT provider_id FROM providers);
 CREATE INDEX IF NOT EXISTS idx_evidence_captures_source ON evidence_captures(evidence_source_id,retrieved_at DESC);
 CREATE INDEX IF NOT EXISTS idx_provider_models_v2_provider ON provider_models_v2(provider_id);
 CREATE INDEX IF NOT EXISTS idx_provider_models_v2_canonical ON provider_models_v2(canonical_model_id);
+CREATE INDEX IF NOT EXISTS idx_provider_model_aliases_model ON provider_model_aliases(provider_model_id);
 CREATE INDEX IF NOT EXISTS idx_events_time ON model_events(event_time DESC);
 CREATE INDEX IF NOT EXISTS idx_events_type ON model_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_claim_subject ON evidence_claims(subject_type,subject_key,field_name);
@@ -452,6 +466,8 @@ CREATE INDEX IF NOT EXISTS idx_offers_active ON access_offers(offer_type,starts_
 CREATE INDEX IF NOT EXISTS idx_harness_entries_order ON harness_model_entries(installation_id,position);
 CREATE INDEX IF NOT EXISTS idx_harness_available_order ON harness_available_model_entries(installation_id,position);
 CREATE INDEX IF NOT EXISTS idx_monitoring_runs_target ON monitoring_runs(monitoring_target_id,started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_endpoint_changes_detected ON endpoint_changes(detected_at DESC,endpoint_change_id DESC);
+CREATE INDEX IF NOT EXISTS idx_endpoint_changes_route ON endpoint_changes(provider_id,model_identifier,detected_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_subscription_provider_access
   ON subscription_model_access(subscription_product_id,provider_model_id,access_type)
   WHERE provider_model_id IS NOT NULL;

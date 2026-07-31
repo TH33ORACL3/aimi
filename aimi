@@ -80,24 +80,43 @@ def subscription(c,a):
 def model_info(c,a):
  pat='%'+a.model+'%'
  canon=[dict(x) for x in c.execute("""SELECT canonical_model_id,canonical_slug,canonical_name,developer,family,architecture,total_parameters,active_parameters,training_tokens,weights_status,license_spdx,lifecycle_status,model_card_url,official_repository_url FROM canonical_models WHERE canonical_slug LIKE ? OR canonical_name LIKE ? OR developer LIKE ? OR family LIKE ? ORDER BY canonical_name""",(pat,pat,pat,pat))]
- routes=[dict(x) for x in c.execute("""SELECT pm.provider_model_id,pm.provider_id,pm.model_identifier,pm.display_name,pm.endpoint_status,pm.endpoint_first_seen_at,pm.endpoint_last_seen_at,pm.context_window_tokens,pm.max_output_tokens,pm.reasoning,pm.tools,cm.canonical_name,cm.developer,cm.family,cm.total_parameters,cm.active_parameters,
+ routes=[dict(x) for x in c.execute("""SELECT pm.provider_model_id,pm.provider_id,pm.model_identifier,pm.display_name,pm.description,pm.provider_created_at,pm.endpoint_status,pm.endpoint_first_seen_at,pm.endpoint_last_seen_at,pm.context_window_tokens,pm.max_input_tokens,pm.max_output_tokens,pm.reasoning,pm.tools,pm.function_calling,pm.structured_outputs,pm.streaming,pm.input_modalities_json,pm.output_modalities_json,pm.tokenizer,pm.quantization,pm.provider_metadata_json,pm.source_snapshot_id,cm.canonical_name,cm.developer,cm.family,cm.total_parameters,cm.active_parameters,
  (SELECT ao.offer_type FROM access_offers ao WHERE ao.provider_model_id=pm.provider_model_id AND (ao.ends_at IS NULL OR datetime(ao.ends_at)>datetime('now')) ORDER BY CASE ao.offer_type WHEN 'genuine_zero_price' THEN 1 WHEN 'temporary_free_window' THEN 2 WHEN 'free_tier_quota' THEN 3 WHEN 'subscription_included' THEN 4 WHEN 'paid' THEN 5 ELSE 6 END LIMIT 1) access_type,
  (SELECT ht.status FROM handshake_tests ht WHERE ht.provider_model_id=pm.provider_model_id ORDER BY datetime(ht.tested_at) DESC,ht.handshake_test_id DESC LIMIT 1) last_test_status,
  (SELECT ht.tested_at FROM handshake_tests ht WHERE ht.provider_model_id=pm.provider_model_id ORDER BY datetime(ht.tested_at) DESC,ht.handshake_test_id DESC LIMIT 1) last_tested_at
  FROM provider_models_v2 pm LEFT JOIN canonical_models cm USING(canonical_model_id)
- WHERE pm.model_identifier LIKE ? OR pm.display_name LIKE ? OR cm.canonical_name LIKE ? OR cm.developer LIKE ? OR cm.family LIKE ? ORDER BY cm.canonical_name,pm.provider_id,pm.model_identifier""",(pat,pat,pat,pat,pat))]
+ WHERE pm.model_identifier LIKE ? OR pm.display_name LIKE ? OR cm.canonical_name LIKE ? OR cm.developer LIKE ? OR cm.family LIKE ?
+ OR EXISTS (SELECT 1 FROM provider_model_aliases pma WHERE pma.provider_model_id=pm.provider_model_id AND pma.alias LIKE ?)
+ ORDER BY cm.canonical_name,pm.provider_id,pm.model_identifier""",(pat,pat,pat,pat,pat,pat))]
  for route_row in routes:
   test=c.execute('''SELECT harness_id,tested_at,test_type,status,latency_ms,observed_features_json,sanitized_error,runner_version FROM handshake_tests WHERE provider_model_id=? ORDER BY datetime(tested_at) DESC,handshake_test_id DESC LIMIT 1''',(route_row['provider_model_id'],)).fetchone()
   route_row['last_test']=_test_summary(test)
+  route_row['endpoint_metadata']=_decode_json(route_row.pop('provider_metadata_json',None))
+  route_row['reasoning_efforts']=route_row['endpoint_metadata'].get('reasoning_efforts') if route_row['endpoint_metadata'] else None
+  route_row['thinking_api']=route_row['endpoint_metadata'].get('thinking_api') if route_row['endpoint_metadata'] else None
+  route_row['aliases']=[dict(x) for x in c.execute('''SELECT alias,alias_type,first_observed_at,last_observed_at,evidence_capture_id FROM provider_model_aliases WHERE provider_model_id=? ORDER BY alias''',(route_row['provider_model_id'],))]
+  if route_row['input_modalities_json']:
+   route_row['input_modalities']=_decode_json(route_row.pop('input_modalities_json'))
+  else:route_row.pop('input_modalities_json',None);route_row['input_modalities']=None
+  if route_row['output_modalities_json']:
+   route_row['output_modalities']=_decode_json(route_row.pop('output_modalities_json'))
+  else:route_row.pop('output_modalities_json',None);route_row['output_modalities']=None
+  route_row['capabilities']=_capability_summary(route_row)
   route_row.pop('last_test_status',None);route_row.pop('last_tested_at',None)
- ids=[x['canonical_model_id'] for x in canon]
+ ids=[x['canonical_model_id'] for x in canon if x['canonical_model_id'] is not None]
+ route_ids=[x['provider_model_id'] for x in routes]
  events=[]
+ clauses=[];params=[]
  if ids:
-  marks=','.join('?'*len(ids));events=[dict(x) for x in c.execute(f"SELECT event_type,event_time,time_precision,confidence,evidence_source_id FROM model_events WHERE canonical_model_id IN ({marks}) ORDER BY datetime(event_time) DESC",ids)]
+  marks=','.join('?'*len(ids));clauses.append(f'canonical_model_id IN ({marks})');params.extend(ids)
+ if route_ids:
+  marks=','.join('?'*len(route_ids));clauses.append(f'provider_model_id IN ({marks})');params.extend(route_ids)
+ if clauses:
+  events=[dict(x) for x in c.execute(f"SELECT event_type,event_time,time_precision,confidence,evidence_source_id,evidence_capture_id,canonical_model_id,provider_model_id,details_json FROM model_events WHERE {' OR '.join(clauses)} ORDER BY datetime(event_time) DESC",params)]
  print(json.dumps({'query':a.model,'canonical_models':canon,'routes':routes,'events':events},indent=2,default=str))
 def maker_models(c,a):
  pat='%'+a.maker+'%'
- rows_json(c.execute("""SELECT cm.developer,cm.canonical_name,cm.family,cm.total_parameters,cm.active_parameters,pm.provider_id,pm.model_identifier,pm.endpoint_status,pm.context_window_tokens,pm.max_output_tokens FROM provider_models_v2 pm LEFT JOIN canonical_models cm USING(canonical_model_id) WHERE cm.developer LIKE ? OR cm.canonical_name LIKE ? OR cm.family LIKE ? OR pm.model_identifier LIKE ? OR pm.display_name LIKE ? ORDER BY cm.canonical_name,pm.provider_id,pm.model_identifier""",(pat,pat,pat,pat,pat)).fetchall())
+ rows_json(c.execute("""SELECT cm.developer,cm.canonical_name,cm.family,cm.total_parameters,cm.active_parameters,pm.provider_id,pm.model_identifier,pm.display_name,pm.endpoint_status,pm.context_window_tokens,pm.max_output_tokens FROM provider_models_v2 pm LEFT JOIN canonical_models cm USING(canonical_model_id) WHERE cm.developer LIKE ? OR cm.canonical_name LIKE ? OR cm.family LIKE ? OR pm.model_identifier LIKE ? OR pm.display_name LIKE ? OR EXISTS (SELECT 1 FROM provider_model_aliases pma WHERE pma.provider_model_id=pm.provider_model_id AND pma.alias LIKE ?) ORDER BY cm.canonical_name,pm.provider_id,pm.model_identifier""",(pat,pat,pat,pat,pat,pat)).fetchall())
 def warp_models(c,a):
  rows_json(c.execute("""SELECT a.position,a.provider_name,a.model_identifier,a.display_name,a.metadata_json,t.tested_at last_tested_at,t.status last_test_status,t.latency_ms,t.exact_output,t.sanitized_error FROM harness_available_model_entries a JOIN harness_installations i USING(installation_id) LEFT JOIN latest_harness_model_tests t ON t.harness_id='obsidian-warp' AND t.model_identifier=a.model_identifier WHERE i.harness_id='obsidian-warp' AND a.last_observed_at=i.last_scanned_at AND (?=0 OR json_extract(a.metadata_json,'$.custom_uuid')=1) ORDER BY a.position""",(int(a.custom),)).fetchall())
 def route(c,a):
@@ -105,15 +124,50 @@ def route(c,a):
  if not row:raise SystemExit('Provider/model route not found')
  offers=[dict(x) for x in c.execute('SELECT offer_type,starts_at,ends_at,input_price_per_million_usd,output_price_per_million_usd,quota_json,rate_limits_json,confidence,last_verified_at FROM access_offers WHERE provider_model_id=? ORDER BY last_verified_at DESC',(row['provider_model_id'],))]
  out=dict(row);out['offers']=offers;out['last_test']=_latest_test(c,row['provider_model_id'])
+ for key in ('input_modalities_json','output_modalities_json'):
+  output_key=key[:-5]
+  out[output_key]=_decode_json(out.pop(key)) if out.get(key) else None
  meta=_decode_json(out.get('provider_metadata_json'))
+ out['endpoint_metadata']=meta
+ out['aliases']=[dict(x) for x in c.execute('''SELECT alias,alias_type,first_observed_at,last_observed_at,evidence_capture_id FROM provider_model_aliases WHERE provider_model_id=? ORDER BY alias''',(row['provider_model_id'],))]
  if meta:
   out['reasoning_efforts']=meta.get('reasoning_efforts')
   out['thinking_api']=meta.get('thinking_api')
- # Remove raw metadata json from output to avoid duplication
+ out['capabilities']=_capability_summary(out)
+ # Remove the duplicated storage column. The structured endpoint metadata remains.
  out.pop('provider_metadata_json',None)
  print(json.dumps(out,indent=2,default=str))
 def changes(c,a):
- q="""SELECT ec.endpoint_change_id,ec.provider_id,ec.change_type,ec.model_identifier,ec.detected_at,ec.reviewed,ec.review_notes FROM endpoint_changes ec WHERE (? IS NULL OR ec.provider_id=?) AND (? OR ec.reviewed=0) ORDER BY datetime(ec.detected_at) DESC LIMIT ?""";rows_json(c.execute(q,(a.provider,a.provider,int(a.all),a.limit)).fetchall())
+    clauses=[];params=[]
+    if a.provider:clauses.append('ec.provider_id=?');params.append(a.provider)
+    if not a.all:clauses.append('ec.reviewed=0')
+    if a.since:clauses.append('date(ec.detected_at)>=date(?)');params.append(a.since)
+    if a.until:clauses.append('date(ec.detected_at)<=date(?)');params.append(a.until)
+    if a.type:clauses.append('ec.change_type=?');params.append(a.type)
+    if a.model:clauses.append('(ec.model_identifier LIKE ? OR COALESCE(pm.display_name,\'\') LIKE ?)');params.extend([f'%{a.model}%',f'%{a.model}%'])
+    diff=',ec.before_json,ec.after_json' if a.diff else ''
+    where=' AND '.join(clauses) or '1=1'
+    q=f"""SELECT ec.endpoint_change_id,ec.monitoring_run_id,ec.provider_id,ec.change_type,ec.model_identifier,
+        COALESCE(pm.display_name,ec.model_identifier) display_name,ec.detected_at,ec.reviewed,ec.review_notes,
+        mr.started_at run_started_at,mr.status run_status,mr.http_status run_http_status,mt.url endpoint_url{diff}
+        FROM endpoint_changes ec
+        JOIN monitoring_runs mr USING(monitoring_run_id)
+        JOIN monitoring_targets mt USING(monitoring_target_id)
+        LEFT JOIN provider_models_v2 pm ON pm.provider_id=ec.provider_id AND pm.model_identifier=ec.model_identifier
+        WHERE {where} ORDER BY datetime(ec.detected_at) DESC,ec.endpoint_change_id DESC LIMIT ?"""
+    params.append(a.limit);rows_json(c.execute(q,params).fetchall())
+def monitor_runs(c,a):
+    clauses=[];params=[]
+    if a.provider:clauses.append('mt.provider_id=?');params.append(a.provider)
+    if a.since:clauses.append('date(mr.started_at)>=date(?)');params.append(a.since)
+    if a.until:clauses.append('date(mr.started_at)<=date(?)');params.append(a.until)
+    if a.status:clauses.append('mr.status=?');params.append(a.status)
+    where=' AND '.join(clauses) or '1=1'
+    q=f"""SELECT mr.monitoring_run_id,mt.provider_id,mt.url endpoint_url,mr.started_at,mr.finished_at,mr.status,
+        mr.http_status,mr.added_count,mr.removed_count,mr.changed_count,mr.response_sha256,mr.snapshot_path,mr.error_summary
+        FROM monitoring_runs mr JOIN monitoring_targets mt USING(monitoring_target_id)
+        WHERE {where} ORDER BY datetime(mr.started_at) DESC,mr.monitoring_run_id DESC LIMIT ?"""
+    params.append(a.limit);rows_json(c.execute(q,params).fetchall())
 def monitor_status(c,_):
  q="""SELECT mt.provider_id,mt.target_type,mt.url,mt.enabled,mt.last_checked_at,mt.last_changed_at,mt.last_success_at,mt.consecutive_failures,(SELECT status FROM monitoring_runs mr WHERE mr.monitoring_target_id=mt.monitoring_target_id ORDER BY mr.monitoring_run_id DESC LIMIT 1) last_status FROM monitoring_targets mt ORDER BY mt.provider_id,mt.target_type""";rows_json(c.execute(q).fetchall())
 def pi_order(c,_):
@@ -147,6 +201,24 @@ def _decode_json(value):
     if not value:return None
     try:return json.loads(value)
     except (TypeError,json.JSONDecodeError):return value
+
+
+def _capability_summary(item):
+    return {
+        'reasoning':item.get('reasoning'),
+        'tools':item.get('tools'),
+        'function_calling':item.get('function_calling'),
+        'structured_outputs':item.get('structured_outputs'),
+        'streaming':item.get('streaming'),
+        'input_modalities':item.get('input_modalities'),
+        'output_modalities':item.get('output_modalities'),
+        'context_window_tokens':item.get('context_window_tokens'),
+        'max_input_tokens':item.get('max_input_tokens'),
+        'max_output_tokens':item.get('max_output_tokens'),
+        'tokenizer':item.get('tokenizer'),
+        'quantization':item.get('quantization'),
+        'reasoning_efforts':item.get('reasoning_efforts'),
+    }
 
 
 def _test_summary(row):
@@ -194,21 +266,25 @@ def where(c,a):
     callers can opt into it with --refresh-harnesses.
     """
     route_rows=c.execute("""SELECT pm.provider_model_id,pm.provider_id,p.display_name provider_name,
-        pm.model_identifier,pm.display_name,pm.endpoint_status,pm.endpoint_first_seen_at,
-        pm.endpoint_last_seen_at,pm.context_window_tokens,pm.max_input_tokens,
-        pm.max_output_tokens,pm.reasoning,pm.tools,pm.function_calling,
-        pm.structured_outputs,pm.streaming,pm.input_modalities_json,pm.output_modalities_json,
-        pm.provider_metadata_json,
+        pm.model_identifier,pm.display_name,pm.description,pm.provider_created_at,
+        pm.endpoint_status,pm.endpoint_first_seen_at,pm.endpoint_last_seen_at,
+        pm.context_window_tokens,pm.max_input_tokens,pm.max_output_tokens,
+        pm.reasoning,pm.tools,pm.function_calling,pm.structured_outputs,pm.streaming,
+        pm.input_modalities_json,pm.output_modalities_json,pm.tokenizer,pm.quantization,
+        pm.provider_metadata_json,pm.source_snapshot_id,
         p.base_url,p.api_style,p.official_models_endpoint,p.last_verified_at provider_last_verified_at,
         cm.canonical_name,cm.developer,cm.family
       FROM provider_models_v2 pm JOIN providers p USING(provider_id)
       LEFT JOIN canonical_models cm USING(canonical_model_id)
       WHERE pm.endpoint_status NOT IN ('unavailable','removed')
       ORDER BY p.display_name,pm.model_identifier""").fetchall()
+    known_aliases={}
+    for alias_row in c.execute('SELECT provider_model_id,alias FROM provider_model_aliases'):
+        known_aliases.setdefault(alias_row['provider_model_id'],[]).append(alias_row['alias'])
     matched=[]
     matched_ids=[]
     for row in route_rows:
-        if not _matches_model(a.model,row['provider_id'],row['provider_name'],row['model_identifier'],row['display_name'],row['canonical_name'],row['developer'],row['family']):continue
+        if not _matches_model(a.model,row['provider_id'],row['provider_name'],row['model_identifier'],row['display_name'],row['canonical_name'],row['developer'],row['family'],*known_aliases.get(row['provider_model_id'],[])):continue
         item=dict(row)
         item['record_type']='provider_route'
         item['input_modalities']=json.loads(item.pop('input_modalities_json')) if item.get('input_modalities_json') else None
@@ -246,11 +322,20 @@ def where(c,a):
             candidate=_health_test_summary(row)
             if _is_newer(candidate,tests.get(row['provider_model_id'])):
                 tests[row['provider_model_id']]=candidate
+    aliases={}
+    if matched_ids:
+        placeholders=','.join('?'*len(matched_ids))
+        for row in c.execute(f'''SELECT provider_model_id,alias,alias_type,first_observed_at,last_observed_at,evidence_capture_id
+          FROM provider_model_aliases WHERE provider_model_id IN ({placeholders}) ORDER BY alias''',matched_ids):
+            aliases.setdefault(row['provider_model_id'],[]).append({k:row[k] for k in ('alias','alias_type','first_observed_at','last_observed_at','evidence_capture_id')})
     for item in matched:
         item['offers']=offers.get(item['provider_model_id'],[])
         item['last_test']=tests.get(item['provider_model_id'])
         meta=_decode_json(item.pop('provider_metadata_json',None)) or {}
+        item['endpoint_metadata']=meta
+        item['aliases']=aliases.get(item['provider_model_id'],[])
         item['reasoning_efforts']=meta.get('reasoning_efforts') if meta else None
+        item['capabilities']=_capability_summary(item)
         item['thinking_api']=meta.get('thinking_api') if meta else None
         item.pop('provider_model_id',None)
 
@@ -501,7 +586,9 @@ def main():
  x=s.add_parser('warp-models');x.add_argument('--custom',action='store_true');x.set_defaults(fn=warp_models)
  x=s.add_parser('route');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=route)
  x=s.add_parser('grok-config');x.add_argument('provider');x.add_argument('model');x.add_argument('--force',action='store_true',help='Generate config even if reasoning is not confirmed in the database');x.set_defaults(fn=grok_config)
- x=s.add_parser('changes');x.add_argument('--provider');x.add_argument('--all',action='store_true');x.add_argument('--limit',type=int,default=50);x.set_defaults(fn=changes)
+ x=s.add_parser('changes',help='Query detected provider model changes; defaults to unreviewed changes')
+ x.add_argument('--provider');x.add_argument('--all',action='store_true',help='Include reviewed changes');x.add_argument('--since');x.add_argument('--until');x.add_argument('--type',choices=['model_added','model_removed','model_changed','pricing_changed','capability_changed','alias_changed','other']);x.add_argument('--model');x.add_argument('--diff',action='store_true',help='Include before_json and after_json');x.add_argument('--limit',type=int,default=50);x.set_defaults(fn=changes)
+ x=s.add_parser('monitor-runs',help='Query every official endpoint poll, including successful and failed runs');x.add_argument('--provider');x.add_argument('--since');x.add_argument('--until');x.add_argument('--status',choices=['running','success','unchanged','changed','failed','rate_limited']);x.add_argument('--limit',type=int,default=100);x.set_defaults(fn=monitor_runs)
  s.add_parser('monitor-status').set_defaults(fn=monitor_status)
  s.add_parser('pi-order').set_defaults(fn=pi_order)
  s.add_parser('harnesses').set_defaults(fn=harnesses)

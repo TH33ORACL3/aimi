@@ -179,7 +179,7 @@ Results use three states:
 - **Orange:** rate limited, so availability is inconclusive.
 - **Red:** failed, unauthorized, timed out, or returned something other than exact `OK`.
 
-The database keeps one current status per route and a bounded daily history. NVIDIA NIM developer-tier checks run separately from the regular OpenRouter and OpenCode cycle.
+The database keeps one current status per route and a bounded daily history. Free-model health checks are now manual and separate from the 15-minute discovery notification job. NVIDIA NIM developer-tier checks are also manual unless explicitly scheduled again.
 
 ```bash
 hyperfine --runs 1 --warmup 0 --show-output \
@@ -193,19 +193,42 @@ hyperfine --runs 1 --warmup 0 --show-output \
 
 ## Monitoring official endpoints
 
-The endpoint monitor covers OpenRouter, OpenCode Zen, OpenCode Go, NVIDIA NIM, DeepSeek, Mistral, OpenAI, Gemini, Cloudflare Workers AI, and Ollama Cloud. It saves timestamped captures, hashes evidence, normalizes volatile fields, records additions and removals, and updates free-offer windows without storing secrets.
+The endpoint monitor covers OpenRouter, OpenCode Zen, OpenCode Go, NVIDIA NIM, DeepSeek, Mistral, OpenAI, Gemini, Cloudflare Workers AI, and Ollama Cloud. It saves timestamped captures, hashes evidence, retains the complete sanitised per-model provider payload, normalizes context/limits/capabilities/modalities/aliases where supplied, records additions and removals, and updates free-offer windows without storing secrets. Every poll is retained in `monitoring_runs` and `model_sources`; every detected route/metadata/pricing change is retained in `endpoint_changes` with the monitoring run, endpoint URL, timestamp, and before/after JSON. Provider-supplied aliases are stored in `provider_model_aliases`. Endpoint-reported paid prices are stored in `access_offers`, and explicit lifecycle date fields are recorded as evidence-linked model events without confusing provider-created timestamps with release dates. Transient provider errors are retried, and one provider failure cannot discard successful discoveries from the other providers.
 
-The Hermes job is:
+The consolidated Hermes discovery job is:
 
 ```text
-model-catalogue-endpoint-monitor (454c1f94d5fe)
+model-catalogue-discovery-notifier (f8ff78fe2fb2)
 ```
+
+It runs every 15 minutes, polls all ten endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and delivers a Telegram notification only when a new model route is observed. It keeps a first-run watermark at `~/.hermes/cron/model-catalogue-discovery-notifier.json` so existing history is not replayed.
 
 Inspect it with:
 
 ```bash
-hermes cron runs 454c1f94d5fe
+hermes cron runs f8ff78fe2fb2
 ```
+
+The former endpoint monitor and scheduled free-model health jobs have been removed. The free health scripts remain available for deliberate manual checks, but they are not part of the discovery notification loop.
+
+Query the complete change history without writing SQL:
+
+```bash
+# Every detected change, including reviewed entries
+./aimi changes --all --since 2026-07-24 --until 2026-07-25
+
+# Only new API routes, with exact before/after payloads
+./aimi changes --all --type model_added --diff --limit 100
+
+# Search one provider or model family
+./aimi changes --all --provider openrouter --model opus --diff
+
+# Every endpoint poll, including unchanged and failed checks
+./aimi monitor-runs --since 2026-07-25 --limit 200
+./aimi monitor-runs --provider openai --status failed
+```
+
+`endpoint_changes` is the durable event log. `monitoring_runs` is the poll/audit log. A provider outage is therefore queryable separately from a model removal or addition, and the raw response snapshot is linked by `snapshot_path` and `response_sha256`.
 
 ## Public export
 

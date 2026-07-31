@@ -6,13 +6,13 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parent; SRC=ROOT/'aimi.db'; DIST=ROOT/'dist'; OUT=DIST/'aimi.public.db'
 PATTERNS={
  'home_path':rb'/Users/TH33_ORACL3',
- 'openai_key':rb'sk-(?:proj-)?[A-Za-z0-9_-]{20,}',
- 'openrouter_key':rb'sk-or-[A-Za-z0-9_-]{20,}',
- 'nvidia_key':rb'nvapi-[A-Za-z0-9_-]{20,}',
- 'github_token':rb'gh[pousr]_[A-Za-z0-9]{20,}',
- 'cloudflare_token':rb'cf(?:at|ut)_[A-Za-z0-9_-]{20,}',
- 'generic_bearer':rb'Bearer [A-Za-z0-9_-]{24,}',
- 'anthropic_key':rb'sk-ant-[A-Za-z0-9_-]{20,}',
+ 'openai_key':rb'(?<![A-Za-z0-9_-])sk-(?:proj-)?[A-Za-z0-9_-]{20,}',
+ 'openrouter_key':rb'(?<![A-Za-z0-9_-])sk-or-[A-Za-z0-9_-]{20,}',
+ 'nvidia_key':rb'(?<![A-Za-z0-9_-])nvapi-[A-Za-z0-9_-]{20,}',
+ 'github_token':rb'(?<![A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}',
+ 'cloudflare_token':rb'(?<![A-Za-z0-9_-])cf(?:at|ut)_[A-Za-z0-9_-]{20,}',
+ 'generic_bearer':rb'(?<![A-Za-z0-9_-])Bearer [A-Za-z0-9_-]{24,}',
+ 'anthropic_key':rb'(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{20,}',
 }
 def main():
  DIST.mkdir(exist_ok=True); OUT.unlink(missing_ok=True)

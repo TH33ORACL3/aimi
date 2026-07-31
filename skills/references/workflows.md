@@ -247,11 +247,13 @@ Unknown end dates must be reported as “duration unpublished,” not “free fo
 "$catalogue" cron-runs
 ```
 
-- The 15-minute Hermes job is `454c1f94d5fe`.
-- It is silent when unchanged.
+- The consolidated 15-minute Hermes job is `f8ff78fe2fb2`, named `model-catalogue-discovery-notifier`.
+- It polls the same 10 official model endpoints, runs `monitor_endpoints.py`, promotes endpoint-only candidates with `ingest_endpoint_candidates.py`, and sends Telegram only for newly observed `model_added` routes.
+- It is silent when there are no new model routes. Provider failures are surfaced as scheduler errors without exposing credential values.
+- A first-run watermark suppresses historical changes; future changes are deduplicated in `~/.hermes/cron/model-catalogue-discovery-notifier.json`.
 - Raw payload hashes are preserved, but alerts use normalized stable fields.
-- Report additions, removals, price changes and free-window changes as candidate findings. Ask Aubrey before ingesting reviewed facts, superseding existing claims, or acting on local configuration.
-- Monitoring snapshots and raw run health may be stored automatically, but newly interpreted facts must not become authoritative database claims without Aubrey's confirmation.
+- Endpoint observations and endpoint-first-seen events may be written automatically. Do not infer official release dates, pricing, capabilities, or free access from an endpoint listing.
+- The former endpoint monitor and the two scheduled free-health jobs are removed. `free_model_health.py` remains available for deliberate manual checks only.
 - If the monitor fails, report the provider and missing credential name/error without showing credential values.
 
 ## Free-only model health
@@ -281,7 +283,7 @@ Use this for “test all free models,” “which free models work,” or “whe
    - `free_model_probe_daily`: one aggregate per route per UTC day;
    - daily history older than 30 days is deleted;
    - `last_ok_at` survives later failures.
-6. The Hermes `free-model-health-monitor` job runs every 12 hours, uses Hyperfine, and remains silent unless a route changes state or the batch itself fails.
+6. No free-model health cron job is currently scheduled. Run the Hyperfine batch manually when a deliberate health check is requested. Do not fold free health probes into the 15-minute discovery job.
 7. Do not insert each periodic health check into `handshake_tests`; that table is for deliberate compatibility tests, not recurring availability telemetry.
 
 ## Validation and sanitized export
