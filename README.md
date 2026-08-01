@@ -42,7 +42,8 @@ Use `py install.py` on Windows when `python` is not the registered command. The 
 
 1. Requires Python 3.11 or newer.
 2. Creates the private local `aimi.db` from `schema_v2.sql` when it does not exist.
-3. Installs the repository's bundled skill to `~/.agents/skills/model-catalogue/` using the platform's home directory.
+3. Installs the repository's bundled skill to `~/.agents/skills/ai-model-index/` using the platform's home directory.
+4. Enables WAL journalling so the scheduled endpoint monitor and an agent reading the catalogue never block each other.
 4. Prints the exact database, skill, and CLI paths after completion.
 
 The installer has no third-party Python dependencies. It uses only the Python standard library and SQLite. API keys are optional for local inspection; provider refreshes and health checks require the relevant environment variables.
@@ -83,7 +84,10 @@ The main CLI is called `aimi`. It can search routes, compare providers, inspect 
 | `free_model_health.py` | Runs bounded exact-OK health checks against eligible no-charge routes |
 | `scan_local_harnesses.py` | Scans local harness configuration and availability |
 | `refresh_catalog.py` | Refreshes provider routes from official endpoints |
-| `validate_catalogue.py` | Checks integrity, evidence, pricing, ordering, and secret rules |
+| `validate_catalogue.py` | Checks integrity, evidence, pricing, ordering, schema drift, and secret rules |
+| `dump_schema.py` | Regenerates `schema_v2.sql` from the live database so fresh installs match |
+| `normalize_paths.py` | Rewrites stored evidence paths to project-relative form |
+| `prune_snapshots.py` | Collapses byte-identical endpoint snapshots, verified by sha256 |
 | `export_sanitized.py` | Creates a public database export with private state removed |
 | `schema_v2.sql` | Core model, provider, evidence, harness, and monitoring schema |
 | `evidence/` and `snapshots/` | Local raw evidence and endpoint captures, never committed |
@@ -91,10 +95,12 @@ The main CLI is called `aimi`. It can search routes, compare providers, inspect 
 The canonical cross-agent skill remains at:
 
 ```text
-$HOME/.agents/skills/model-catalogue/SKILL.md
+$HOME/.agents/skills/ai-model-index/SKILL.md
 ```
 
-AIMI is the project and CLI name. `model-catalogue` is the internal skill name used by the agent tooling.
+AIMI is the project and CLI name. `ai-model-index` is the skill name that agents load. Installing the skill under any other directory name creates a second competing copy, so `install.py` always targets this path.
+
+Run `python install.py --upgrade` on an existing checkout to apply new schema objects to a populated database without touching data. Every statement in `schema_v2.sql` is `IF NOT EXISTS`.
 
 ## CLI examples
 
@@ -103,6 +109,8 @@ AIMI is the project and CLI name. `model-catalogue` is the internal skill name u
 ```bash
 ./aimi summary
 ./aimi doctor
+./aimi version
+./aimi commands
 ./aimi latest --limit 20
 ./aimi free
 ./aimi free --provider openrouter
@@ -112,6 +120,10 @@ AIMI is the project and CLI name. `model-catalogue` is the internal skill name u
 ```
 
 `aimi where` returns every matching provider route, its access semantics, known limits, harness matches, freshness, and the latest test outcome when one exists.
+
+`aimi commands` returns a machine-readable manifest of every command, its arguments, and whether it writes. Agents should read that instead of guessing the surface.
+
+The CLI opens the database **read-only** for every command except `changes-review`, so a query can never damage the catalogue or block the endpoint monitor. Set `AIMI_DB` to point the CLI at a copy or an export.
 
 ### Harness inventory
 
@@ -230,6 +242,25 @@ Query the complete change history without writing SQL:
 
 `endpoint_changes` is the durable event log. `monitoring_runs` is the poll/audit log. A provider outage is therefore queryable separately from a model removal or addition, and the raw response snapshot is linked by `snapshot_path` and `response_sha256`.
 
+Snapshots are content addressed. When an endpoint returns a byte-identical payload the run is linked to the existing capture instead of writing a duplicate file, so `snapshots/` grows with real change rather than with poll frequency. `prune_snapshots.py` applies the same rule retroactively and refuses to delete anything when a recorded hash does not match the file on disk.
+
+Stored evidence paths are project-relative. A rename or a different checkout location cannot break the evidence chain, and `validate_catalogue.py` fails when a referenced capture is missing.
+
+### Reviewing changes
+
+Detected changes stay unreviewed until someone accepts them:
+
+```bash
+# Preview exactly what would be accepted
+./aimi changes-review --provider openrouter --type pricing_changed
+
+# Accept that set, recording why
+./aimi changes-review --provider openrouter --type pricing_changed \
+  --note 'Reviewed 2026-08-01: OpenRouter price refresh' --apply
+```
+
+The command previews by default and refuses to write without `--note`. Bulk-accepting the log purely to make validation pass defeats the point of the event log.
+
 ## Public export
 
 The private database, raw endpoint captures, local harness state, personal rankings, account identifiers, and credential inventory stay local. To produce a sanitized database for review or publication:
@@ -245,6 +276,7 @@ The exporter removes private state, runs SQLite integrity validation, and perfor
 ```bash
 ./scan_local_harnesses.py
 ./validate_catalogue.py
+./dump_schema.py --check
 ./export_sanitized.py
 ```
 

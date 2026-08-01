@@ -370,17 +370,41 @@ def change_types(before,after):
   types.append('model_changed')
  return types
 
+def stored_path(value):
+ """Resolve a stored evidence path. Paths are project-relative by design."""
+ p=Path(value)
+ return p if p.is_absolute() else ROOT/p
+
+
+def snapshot_for(c,target,pid,raw):
+ """Return the snapshot path for this payload, writing a file only when new.
+
+ Snapshots are content addressed by sha256. Every poll used to write a full
+ copy even when the endpoint returned byte-identical JSON, which grew
+ snapshots/ by roughly 50 MB a day and left more than half the files as exact
+ duplicates. Pointing an unchanged run at the identical existing capture
+ preserves the evidence chain exactly, because equal hashes mean equal bytes.
+ """
+ sha=hashlib.sha256(raw).hexdigest()
+ existing=c.execute("SELECT snapshot_path FROM monitoring_runs WHERE monitoring_target_id=? AND response_sha256=? AND snapshot_path IS NOT NULL ORDER BY monitoring_run_id DESC LIMIT 1",(target,sha)).fetchone()
+ if existing and existing[0] and stored_path(existing[0]).exists():
+  return existing[0],sha,False
+ path=SNAP/f'{pid}-{STAMP}.json'
+ path.write_bytes(raw)
+ return str(path.relative_to(ROOT)),sha,True
+
+
 def poll(c,pid,url,env,key):
  target=ensure_target(c,pid,url); c.execute("INSERT INTO monitoring_runs(monitoring_target_id,started_at,status) VALUES(?,?,'running')",(target,NOW)); run=c.execute('SELECT last_insert_rowid()').fetchone()[0]
  try:status,raw,headers=fetch(pid,url,env); payload=json.loads(raw); current=rows(pid,payload,key)
  except Exception as e:
   c.execute("UPDATE monitoring_runs SET finished_at=?,status='failed',error_summary=? WHERE monitoring_run_id=?",(NOW,str(e)[:500],run)); c.execute("UPDATE monitoring_targets SET last_checked_at=?,consecutive_failures=consecutive_failures+1 WHERE monitoring_target_id=?",(NOW,target)); c.commit(); return {'provider':pid,'status':'failed','error':str(e)}
- path=SNAP/f'{pid}-{STAMP}.json'; path.write_bytes(raw); sid,cap,sha=source_capture(c,pid,url,raw,path,status)
- source_snapshot_id=ensure_model_source(c,pid,url,status,raw,path,len(current))
+ snap,sha,is_new=snapshot_for(c,target,pid,raw); sid,cap,_=source_capture(c,pid,url,raw,snap,status)
+ source_snapshot_id=ensure_model_source(c,pid,url,status,raw,snap,len(current))
  prior=c.execute("SELECT monitoring_run_id,snapshot_path,response_sha256 FROM monitoring_runs WHERE monitoring_target_id=? AND monitoring_run_id<>? AND status IN ('success','unchanged','changed') ORDER BY monitoring_run_id DESC LIMIT 1",(target,run)).fetchone()
  previous={}
- if prior and prior[1] and Path(prior[1]).exists():
-  old=json.loads(Path(prior[1]).read_text()); previous=rows(pid,old,key)
+ if prior and prior[1] and stored_path(prior[1]).exists():
+  old=json.loads(stored_path(prior[1]).read_text()); previous=rows(pid,old,key)
  added=sorted(set(current)-set(previous)); removed=sorted(set(previous)-set(current)); changed_candidates=sorted(k for k in set(current)&set(previous) if current[k]!=previous[k]); changed=[]
  baseline=prior is None
  if baseline:added=[];removed=[];changed_candidates=[]
@@ -409,7 +433,7 @@ def poll(c,pid,url,env,key):
  # Raw payload hashes may change because of volatile timestamps, ordering, or provider metadata.
  # User-visible change status is based on normalized model additions/removals/field changes.
  state=('changed' if (added or removed or changed) else 'unchanged') if prior else 'success'
- c.execute("UPDATE monitoring_runs SET finished_at=?,status=?,http_status=?,response_sha256=?,snapshot_path=?,added_count=?,removed_count=?,changed_count=? WHERE monitoring_run_id=?",(NOW,state,status,sha,str(path),len(added),len(removed),len(changed),run))
+ c.execute("UPDATE monitoring_runs SET finished_at=?,status=?,http_status=?,response_sha256=?,snapshot_path=?,added_count=?,removed_count=?,changed_count=? WHERE monitoring_run_id=?",(NOW,state,status,sha,snap,len(added),len(removed),len(changed),run))
  c.execute("UPDATE monitoring_targets SET last_checked_at=?,last_success_at=?,last_changed_at=CASE WHEN ?='changed' THEN ? ELSE last_changed_at END,consecutive_failures=0 WHERE monitoring_target_id=?",(NOW,NOW,state,NOW,target)); c.commit()
  return {'provider':pid,'status':state,'models':len(current),'added':len(added),'removed':len(removed),'changed':len(changed)}
 

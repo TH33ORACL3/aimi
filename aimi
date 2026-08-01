@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Human- and agent-friendly interface to the personal AI model index."""
 from __future__ import annotations
-import argparse,json,sqlite3,sys,shutil,subprocess
+import argparse,json,os,sqlite3,sys,shutil,subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-ROOT=Path(__file__).resolve().parent; DB=ROOT/'aimi.db'; HOME=Path.home()
+VERSION='aimi/1.2.0'
+ROOT=Path(__file__).resolve().parent; HOME=Path.home()
+# AIMI_DB lets an agent point the CLI at a copy, an export, or a test database
+# without editing the project. Unset means the private catalogue next to this file.
+DB=Path(os.environ['AIMI_DB']).expanduser() if os.environ.get('AIMI_DB') else ROOT/'aimi.db'
 PI_ALIAS={'opencode-zen':'opencode','nvidia-nim':'nvidia','cloudflare-ai':'cloudflare-workers-ai'}
 
 def refresh_local_harnesses():
@@ -15,8 +19,16 @@ def refresh_local_harnesses():
         raise SystemExit(f'Live harness scan failed: {detail}')
 
 
-def db():
- c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');return c
+def db(write=False):
+ """Open the catalogue read-only unless a command declares that it writes.
+
+ Every query command is a reader. Opening read-only means a CLI bug, a bad
+ query, or an interrupted command cannot damage the authoritative database,
+ and it cannot block the 15-minute endpoint monitor from committing.
+ """
+ if not DB.exists():raise SystemExit(f'No AIMI database at {DB}. Run: python install.py')
+ c=sqlite3.connect(f'file:{DB}?mode={"rw" if write else "ro"}',uri=True,timeout=30)
+ c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');c.execute('PRAGMA busy_timeout=30000');return c
 def rows_json(rows): print(json.dumps([dict(x) for x in rows],indent=2,default=str))
 def summary(c,_):
  print(json.dumps({
@@ -396,13 +408,60 @@ def where(c,a):
         },
     },indent=2,default=str))
 def order_diff(c,a):
- def profile(name):return [f"{r['provider_id']}/{r['model_identifier']}" for r in c.execute("SELECT e.provider_id,e.model_identifier FROM model_order_profile_entries e JOIN model_order_profiles p USING(profile_id) WHERE p.harness_id=? AND p.profile_name=? ORDER BY e.position",(a.harness,name))]
+ def profile(name):return _order_profile(c,a.harness,name)
  current=profile('current-local-order');preferred=profile('aubrey-preferred-order');
  out={'harness':a.harness,'current_count':len(current),'preferred_count':len(preferred),'matches':current==preferred,'missing_from_current':[x for x in preferred if x not in current],'unexpected_current':[x for x in current if x not in preferred],'moves':[]}
  pos={x:i+1 for i,x in enumerate(current)}
  for i,x in enumerate(preferred,1):
   if x in pos and pos[x]!=i:out['moves'].append({'model':x,'current':pos[x],'preferred':i,'distance':pos[x]-i})
  print(json.dumps(out,indent=2))
+def _order_profile(c,harness,name):
+ """Ordered provider/model entries for one harness order profile."""
+ return [f"{r['provider_id']}/{r['model_identifier']}" for r in c.execute("SELECT e.provider_id,e.model_identifier FROM model_order_profile_entries e JOIN model_order_profiles p USING(profile_id) WHERE p.harness_id=? AND p.profile_name=? ORDER BY e.position",(harness,name))]
+
+
+def changes_review(c,a):
+ """Mark endpoint changes reviewed. Previews by default; --apply writes.
+
+ Endpoint changes are the durable event log, and validation requires them to
+ be triaged. Without this command the backlog can only grow, so validation
+ can never pass. Filters are the same ones `aimi changes` accepts, so an
+ agent can review exactly the set it just read.
+ """
+ clauses=['reviewed=0'];params=[]
+ if a.provider:clauses.append('provider_id=?');params.append(a.provider)
+ if a.type:clauses.append('change_type=?');params.append(a.type)
+ if a.since:clauses.append('date(detected_at)>=date(?)');params.append(a.since)
+ if a.until:clauses.append('date(detected_at)<=date(?)');params.append(a.until)
+ if a.model:clauses.append('model_identifier LIKE ?');params.append(f'%{a.model}%')
+ if a.max_id is not None:clauses.append('endpoint_change_id<=?');params.append(a.max_id)
+ if a.id:
+  marks=','.join('?'*len(a.id));clauses.append(f'endpoint_change_id IN ({marks})');params.extend(a.id)
+ where=' AND '.join(clauses)
+ matched=c.execute(f'SELECT COUNT(*) FROM endpoint_changes WHERE {where}',params).fetchone()[0]
+ breakdown=[dict(x) for x in c.execute(f'SELECT provider_id,change_type,COUNT(*) matches,MIN(detected_at) earliest,MAX(detected_at) latest FROM endpoint_changes WHERE {where} GROUP BY 1,2 ORDER BY matches DESC',params)]
+ sample=[dict(x) for x in c.execute(f'SELECT endpoint_change_id,provider_id,change_type,model_identifier,detected_at FROM endpoint_changes WHERE {where} ORDER BY endpoint_change_id DESC LIMIT 10',params)]
+ out={'filters':{'provider':a.provider,'type':a.type,'since':a.since,'until':a.until,'model':a.model,'max_id':a.max_id,'ids':a.id},'matched_unreviewed':matched,'breakdown':breakdown,'sample':sample,'note':a.note,'apply':bool(a.apply)}
+ if a.apply:
+  if not a.note:raise SystemExit('Refusing to mark changes reviewed without --note explaining the decision')
+  cur=c.execute(f'UPDATE endpoint_changes SET reviewed=1,review_notes=? WHERE {where}',[a.note]+params)
+  c.commit();out['marked_reviewed']=cur.rowcount
+  out['remaining_unreviewed']=c.execute('SELECT COUNT(*) FROM endpoint_changes WHERE reviewed=0').fetchone()[0]
+ else:
+  out['hint']='Re-run with --note "<why>" --apply to record the review'
+ print(json.dumps(out,indent=2,default=str))
+
+
+def commands(c,a):
+ """Machine-readable command manifest so an agent can discover the surface."""
+ print(json.dumps({'version':VERSION,'database':str(DB),'commands':COMMAND_MANIFEST},indent=2))
+
+
+def version(c,a):
+ row=c.execute('PRAGMA user_version').fetchone()[0]
+ print(json.dumps({'version':VERSION,'schema_user_version':row,'database':str(DB),'database_bytes':DB.stat().st_size,'journal_mode':c.execute('PRAGMA journal_mode').fetchone()[0]},indent=2))
+
+
 def doctor(c,_):
  checks={
   'integrity':c.execute('PRAGMA integrity_check').fetchone()[0],
@@ -412,7 +471,9 @@ def doctor(c,_):
   'active_free_offers_without_end_date':c.execute("SELECT COUNT(*) FROM access_offers WHERE offer_type='temporary_free_window' AND ends_at IS NULL").fetchone()[0],
   'claims_without_capture':c.execute('SELECT COUNT(*) FROM evidence_claims WHERE evidence_capture_id IS NULL').fetchone()[0],
   'unreviewed_endpoint_changes':c.execute('SELECT COUNT(*) FROM endpoint_changes WHERE reviewed=0').fetchone()[0],
-  'pi_order_matches_preference':c.execute("SELECT COUNT(*) FROM model_order_profile_entries e JOIN model_order_profiles p USING(profile_id) WHERE p.harness_id='pi' AND p.profile_name='current-local-order'").fetchone()[0]==c.execute("SELECT COUNT(*) FROM model_order_profile_entries e JOIN model_order_profiles p USING(profile_id) WHERE p.harness_id='pi' AND p.profile_name='aubrey-preferred-order'").fetchone()[0],
+  # Compare the actual ordered lists. Equal lengths with different models or a
+  # different order is still drift, and a count check would call that healthy.
+  'pi_order_matches_preference':_order_profile(c,'pi','current-local-order')==_order_profile(c,'pi','aubrey-preferred-order'),
  }
  print(json.dumps(checks,indent=2))
 def recommend(c,a):
@@ -569,40 +630,70 @@ def grok_config(c,a):
     print(json.dumps(result, indent=2, default=str))
 
 
-def main():
- p=argparse.ArgumentParser(prog='aimi');s=p.add_subparsers(dest='cmd',required=True)
- s.add_parser('summary').set_defaults(fn=summary)
- x=s.add_parser('free');x.add_argument('--provider');x.set_defaults(fn=free)
- x=s.add_parser('latest-free');x.add_argument('--provider',default='openrouter');x.add_argument('--limit',type=int,default=10);x.set_defaults(fn=latest_free)
- x=s.add_parser('free-health');x.add_argument('--provider');x.add_argument('--failures-only',action='store_true');x.set_defaults(fn=free_health)
- s.add_parser('free-health-summary').set_defaults(fn=free_health_summary)
- x=s.add_parser('latest');x.add_argument('--limit',type=int,default=20);x.set_defaults(fn=latest)
- x=s.add_parser('timeline',help='Release and endpoint timeline for a date range');x.add_argument('--since',required=True,help='ISO date, e.g. 2026-07-18');x.add_argument('--until',help='ISO date, inclusive');x.set_defaults(fn=timeline)
- s.add_parser('providers').set_defaults(fn=providers)
- x=s.add_parser('subscriptions');x.add_argument('--mine',action='store_true');x.set_defaults(fn=subscriptions)
- x=s.add_parser('subscription');x.add_argument('product');x.set_defaults(fn=subscription)
- x=s.add_parser('model-info');x.add_argument('model');x.set_defaults(fn=model_info)
- x=s.add_parser('maker-models');x.add_argument('maker');x.set_defaults(fn=maker_models)
- x=s.add_parser('warp-models');x.add_argument('--custom',action='store_true');x.set_defaults(fn=warp_models)
- x=s.add_parser('route');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=route)
- x=s.add_parser('grok-config');x.add_argument('provider');x.add_argument('model');x.add_argument('--force',action='store_true',help='Generate config even if reasoning is not confirmed in the database');x.set_defaults(fn=grok_config)
- x=s.add_parser('changes',help='Query detected provider model changes; defaults to unreviewed changes')
+COMMAND_MANIFEST=[]
+
+def build_parser():
+ p=argparse.ArgumentParser(prog='aimi',description='Evidence-first AI model catalogue across providers and agent harnesses.')
+ p.add_argument('--version',action='version',version=VERSION)
+ s=p.add_subparsers(dest='cmd',required=True,metavar='<command>')
+ def add(name,help_text,write=False):
+  sub=s.add_parser(name,help=help_text,description=help_text)
+  sub.set_defaults(_write=write)
+  return sub
+ add('summary','Catalogue-wide counts: routes, models, evidence, harnesses').set_defaults(fn=summary)
+ add('version','CLI version, schema version, database path and journal mode').set_defaults(fn=version)
+ add('commands','Machine-readable manifest of every command and argument').set_defaults(fn=commands)
+ x=add('free','Provider routes currently proven no-charge');x.add_argument('--provider',help='Limit to one provider id');x.set_defaults(fn=free)
+ x=add('latest-free','Newest currently free routes for one provider');x.add_argument('--provider',default='openrouter');x.add_argument('--limit',type=int,default=10);x.set_defaults(fn=latest_free)
+ x=add('free-health','Per-route health of free models with colour, status and last result');x.add_argument('--provider');x.add_argument('--failures-only',action='store_true',help='Only routes that are not green');x.set_defaults(fn=free_health)
+ add('free-health-summary','Green/orange/red counts and probe retention window').set_defaults(fn=free_health_summary)
+ x=add('latest','Most recent verified model events');x.add_argument('--limit',type=int,default=20);x.set_defaults(fn=latest)
+ x=add('timeline','Release and endpoint timeline for a date range');x.add_argument('--since',required=True,help='ISO date, e.g. 2026-07-18');x.add_argument('--until',help='ISO date, inclusive');x.set_defaults(fn=timeline)
+ add('providers','Every known provider with endpoint, auth env var and pricing policy').set_defaults(fn=providers)
+ x=add('subscriptions','Subscription products and personal entitlement status');x.add_argument('--mine',action='store_true',help='Only subscriptions Aubrey holds');x.set_defaults(fn=subscriptions)
+ x=add('subscription','One subscription product and every route it covers');x.add_argument('product');x.set_defaults(fn=subscription)
+ x=add('model-info','Canonical identity, all routes and all events for a model search');x.add_argument('model');x.set_defaults(fn=model_info)
+ x=add('maker-models','Every route for a model maker/developer across all providers');x.add_argument('maker');x.set_defaults(fn=maker_models)
+ x=add('warp-models','Warp harness models, including custom UUID entries');x.add_argument('--custom',action='store_true');x.set_defaults(fn=warp_models)
+ x=add('route','One exact provider/model route with offers, metadata and last test');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=route)
+ x=add('grok-config','Generate a Grok CLI [model.*] TOML block with thinking enabled');x.add_argument('provider');x.add_argument('model');x.add_argument('--force',action='store_true',help='Generate config even if reasoning is not confirmed in the database');x.set_defaults(fn=grok_config)
+ x=add('changes','Query detected provider model changes; defaults to unreviewed changes')
  x.add_argument('--provider');x.add_argument('--all',action='store_true',help='Include reviewed changes');x.add_argument('--since');x.add_argument('--until');x.add_argument('--type',choices=['model_added','model_removed','model_changed','pricing_changed','capability_changed','alias_changed','other']);x.add_argument('--model');x.add_argument('--diff',action='store_true',help='Include before_json and after_json');x.add_argument('--limit',type=int,default=50);x.set_defaults(fn=changes)
- x=s.add_parser('monitor-runs',help='Query every official endpoint poll, including successful and failed runs');x.add_argument('--provider');x.add_argument('--since');x.add_argument('--until');x.add_argument('--status',choices=['running','success','unchanged','changed','failed','rate_limited']);x.add_argument('--limit',type=int,default=100);x.set_defaults(fn=monitor_runs)
- s.add_parser('monitor-status').set_defaults(fn=monitor_status)
- s.add_parser('pi-order').set_defaults(fn=pi_order)
- s.add_parser('harnesses').set_defaults(fn=harnesses)
- x=s.add_parser('harness-models');x.add_argument('harness');x.add_argument('--history',action='store_true');x.add_argument('--kind',choices=['all','configured','available'],default='all');x.set_defaults(fn=harness_models)
- x=s.add_parser('where');x.add_argument('model');x.add_argument('--refresh-harnesses',action='store_true',help='Refresh local harness config before matching; slower');x.add_argument('--no-harnesses',action='store_true',help='Skip cached local harness matches');x.set_defaults(fn=where)
- x=s.add_parser('order-diff');x.add_argument('harness',default='pi',nargs='?');x.set_defaults(fn=order_diff)
- s.add_parser('doctor').set_defaults(fn=doctor)
- x=s.add_parser('recommend');x.add_argument('--task',default='coding');x.add_argument('--free',action='store_true');x.add_argument('--provider');x.add_argument('--limit',type=int,default=10);x.set_defaults(fn=recommend)
- x=s.add_parser('pi-fragment');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=pi_fragment)
- x=s.add_parser('pi-register');x.add_argument('provider');x.add_argument('model');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_register)
- x=s.add_parser('pi-select');x.add_argument('provider');x.add_argument('model');x.add_argument('--position',type=int);x.add_argument('--default',action='store_true');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_select)
- x=s.add_parser('pi-add-latest-free');x.add_argument('--provider',default='openrouter');x.add_argument('--position',type=int);x.add_argument('--default',action='store_true');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_add_latest_free)
- x=s.add_parser('pi-remove');x.add_argument('provider');x.add_argument('model');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_remove)
+ x=add('changes-review','Mark endpoint changes reviewed; previews unless --apply',write=True)
+ x.add_argument('--provider');x.add_argument('--type',choices=['model_added','model_removed','model_changed','pricing_changed','capability_changed','alias_changed','other']);x.add_argument('--since');x.add_argument('--until');x.add_argument('--model');x.add_argument('--max-id',type=int,dest='max_id',help='Only changes with an id at or below this value');x.add_argument('--id',type=int,action='append',help='Review one exact change id; repeatable');x.add_argument('--note',help='Why these changes were accepted; required with --apply');x.add_argument('--apply',action='store_true');x.set_defaults(fn=changes_review)
+ x=add('monitor-runs','Every official endpoint poll, including unchanged and failed runs');x.add_argument('--provider');x.add_argument('--since');x.add_argument('--until');x.add_argument('--status',choices=['running','success','unchanged','changed','failed','rate_limited']);x.add_argument('--limit',type=int,default=100);x.set_defaults(fn=monitor_runs)
+ add('monitor-status','Per-endpoint last check, last change and failure streak').set_defaults(fn=monitor_status)
+ add('pi-order','Live Pi enabledModels in exact order, with positions and default').set_defaults(fn=pi_order)
+ add('harnesses','Known harnesses and which are installed locally (live rescan)').set_defaults(fn=harnesses)
+ x=add('harness-models','Configured and available models for one harness (live rescan)');x.add_argument('harness');x.add_argument('--history',action='store_true');x.add_argument('--kind',choices=['all','configured','available'],default='all');x.set_defaults(fn=harness_models)
+ x=add('where','All provider routes, offers, harness matches and freshness for a model');x.add_argument('model');x.add_argument('--refresh-harnesses',action='store_true',help='Refresh local harness config before matching; slower');x.add_argument('--no-harnesses',action='store_true',help='Skip cached local harness matches');x.set_defaults(fn=where)
+ x=add('order-diff','Difference between live harness order and the durable preference');x.add_argument('harness',default='pi',nargs='?');x.set_defaults(fn=order_diff)
+ add('doctor','Fast integrity and completeness checks over the catalogue').set_defaults(fn=doctor)
+ x=add('recommend','Rank routes for a task, optionally free-only');x.add_argument('--task',default='coding');x.add_argument('--free',action='store_true');x.add_argument('--provider');x.add_argument('--limit',type=int,default=10);x.set_defaults(fn=recommend)
+ x=add('pi-fragment','Pi models.json provider fragment for one route');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=pi_fragment)
+ x=add('pi-register','Register a route in Pi models.json; previews unless --apply');x.add_argument('provider');x.add_argument('model');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_register)
+ x=add('pi-select','Enable a route in Pi at a position; previews unless --apply');x.add_argument('provider');x.add_argument('model');x.add_argument('--position',type=int);x.add_argument('--default',action='store_true');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_select)
+ x=add('pi-add-latest-free','Register and enable the newest free route for a provider');x.add_argument('--provider',default='openrouter');x.add_argument('--position',type=int);x.add_argument('--default',action='store_true');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_add_latest_free)
+ x=add('pi-remove','Remove a route from Pi enabledModels; previews unless --apply');x.add_argument('provider');x.add_argument('model');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_remove)
+ return p,s
+
+
+def manifest(subparsers):
+ out=[]
+ for name,sub in sorted(subparsers.choices.items()):
+  args=[]
+  for action in sub._actions:
+   if action.dest in ('help','_write'):continue
+   args.append({'name':action.option_strings[0] if action.option_strings else action.dest,'dest':action.dest,'required':bool(action.required),'positional':not action.option_strings,'choices':list(action.choices) if action.choices else None,'default':action.default,'help':action.help})
+  out.append({'command':name,'help':sub.description,'writes':bool(sub.get_default('_write')),'arguments':args})
+ return out
+
+
+def main():
+ global COMMAND_MANIFEST
+ p,s=build_parser()
  a=p.parse_args()
+ COMMAND_MANIFEST=manifest(s)
  if a.cmd in {'harnesses','harness-models','warp-models'} or (a.cmd=='where' and a.refresh_harnesses):refresh_local_harnesses()
- c=db();a.fn(c,a)
+ c=db(write=getattr(a,'_write',False));a.fn(c,a)
 if __name__=='__main__':main()

@@ -55,7 +55,7 @@
     {
       "check": "endpoint_changes_reviewed",
       "passed": false,
-      "value": 1969,
+      "value": 2008,
       "expected": 0
     },
     {
@@ -83,6 +83,18 @@
       "expected": 0
     },
     {
+      "check": "schema_file_matches_database",
+      "passed": true,
+      "value": "in sync",
+      "expected": "in sync"
+    },
+    {
+      "check": "referenced_snapshots_present",
+      "passed": true,
+      "value": 0,
+      "expected": 0
+    },
+    {
       "check": "database_secret_scan",
       "passed": true,
       "value": 0,
@@ -90,10 +102,10 @@
     }
   ],
   "metrics": {
-    "provider_routes": 911,
-    "canonical_models": 774,
+    "provider_routes": 912,
+    "canonical_models": 775,
     "active_free_routes": 146,
-    "verified_events": 907,
+    "verified_events": 908,
     "evidence_sources": 52,
     "claims": 87,
     "installed_harnesses": 12,

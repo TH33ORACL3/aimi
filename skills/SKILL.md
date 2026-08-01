@@ -83,7 +83,7 @@ The database stores this in `harness_provider_support.config_schema_json` per (h
 Resolve all relative skill paths against this skill directory. Use the wrapper instead of rebuilding SQL or config logic by hand.
 
 ```bash
-SKILL="$HOME/.agents/skills/model-catalogue"
+SKILL="$HOME/.agents/skills/ai-model-index"
 "$SKILL/scripts/catalogue" summary
 ```
 
@@ -116,10 +116,12 @@ Install or refresh the skill and initialise the database with `python install.py
 
 15. **Identify models by maker, not provider.** When Aubrey asks for models from a company or model family (for example, “OpenAI models”), search the canonical model identity/developer, display name, model identifier, and aliases across every harness and provider. Do not restrict the answer to providers whose name contains that company. For OpenAI, this must surface routes such as `openrouter/openai/gpt-oss-120b:free` even though the provider is OpenRouter, and any NVIDIA/OpenCode/Cloudflare/other route for the same OpenAI model.
 16. **Show every provider route for the same model.** When answering questions about a specific model — "latest free", "newest", "what's available" — always list **every provider route** (OpenRouter, OpenCode Zen, NVIDIA NIM, Cloudflare, etc.) for that model, not just the top result. Duplicate models across providers are relevant information and must be shown with their distinct evidence, pricing, and date semantics.
-16. **Ollama means cloud-only for Aubrey.** Use provider `ollama-cloud` and the official cloud endpoints `https://ollama.com/api/tags` or `https://ollama.com/v1/models`. For runtime tests, force `OLLAMA_HOST=https://ollama.com`. Do not catalogue, recommend, pull, benchmark, or configure locally hosted Ollama models unless Aubrey explicitly reverses this preference.
-17. **Periodic health probes are free-only and bounded.** Select targets exclusively from `currently_free_provider_models`; never probe paid, subscription-only, unknown-pricing, expired-window, or merely open-weight models. Use the exact prompt `Reply with exactly OK`, parallel bounded workers, and Hyperfine around the batch. Persist one upserted current status per route plus one compact daily aggregate per route, retaining only 30 days. Preserve `last_ok_at` even after later failures.
-18. **Use three health colours without conflating rate limits with failure.** `green` means the latest probe returned exact `OK`; `orange` means the latest probe was rate-limited (normally HTTP 429), so availability is inconclusive rather than failed; `red` means the latest probe was reachable but failed the exact-OK contract, returned another HTTP error, timed out, was unauthorized, or was otherwise unusable. Always show the detailed `last_status`, HTTP code, human-readable `result_description`, last-tested time, and last-OK time alongside the colour.
-19. **NVIDIA NIM uses an official free developer/evaluation tier.** Direct `nvidia-nim` routes are `free_tier_quota`, backed by NVIDIA's “free access ... for unlimited prototyping” and “Free serverless APIs for development” statements. Do not call this permanent zero-price production access. Preserve each route's detailed health result; test NVIDIA NIM weekly rather than every 12 hours to limit unnecessary evaluation usage.
+17. **Ollama means cloud-only for Aubrey.** Use provider `ollama-cloud` and the official cloud endpoints `https://ollama.com/api/tags` or `https://ollama.com/v1/models`. For runtime tests, force `OLLAMA_HOST=https://ollama.com`. Do not catalogue, recommend, pull, benchmark, or configure locally hosted Ollama models unless Aubrey explicitly reverses this preference.
+18. **Periodic health probes are free-only and bounded.** Select targets exclusively from `currently_free_provider_models`; never probe paid, subscription-only, unknown-pricing, expired-window, or merely open-weight models. Use the exact prompt `Reply with exactly OK`, parallel bounded workers, and Hyperfine around the batch. Persist one upserted current status per route plus one compact daily aggregate per route, retaining only 30 days. Preserve `last_ok_at` even after later failures.
+19. **Use three health colours without conflating rate limits with failure.** `green` means the latest probe returned exact `OK`; `orange` means the latest probe was rate-limited (normally HTTP 429), so availability is inconclusive rather than failed; `red` means the latest probe was reachable but failed the exact-OK contract, returned another HTTP error, timed out, was unauthorized, or was otherwise unusable. Always show the detailed `last_status`, HTTP code, human-readable `result_description`, last-tested time, and last-OK time alongside the colour.
+20. **NVIDIA NIM uses an official free developer/evaluation tier.** Direct `nvidia-nim` routes are `free_tier_quota`, backed by NVIDIA's “free access ... for unlimited prototyping” and “Free serverless APIs for development” statements. Do not call this permanent zero-price production access. Preserve each route's detailed health result; test NVIDIA NIM weekly rather than every 12 hours to limit unnecessary evaluation usage.
+21. **Reviewing endpoint changes is a decision, not cleanup.** `aimi changes-review` previews by default and requires `--note` with `--apply`. Never bulk-mark the change log reviewed to make validation pass. Show Aubrey the breakdown by provider and change type first, and get approval for the exact set being accepted.
+22. **The catalogue is read-only from the CLI.** `aimi` opens the database read-only for every command except `changes-review`. Maintenance that writes (`normalize_paths.py`, `prune_snapshots.py`, `dump_schema.py`, ingestion scripts) takes its own timestamped backup and must be run deliberately, never as a side effect of answering a question.
 
 ## Intent routing
 
@@ -134,12 +136,12 @@ Install or refresh the skill and initialise the database with `python install.py
 | “Where can I use model X?” | Run one fast read: `catalogue where '<model>'`. It returns every available provider route, offers/pricing semantics, cached harness matches, and freshness metadata. Use `--refresh-harnesses` only when current local config rather than cached config is specifically required. |
 | “What models are in any installed harness?” | `catalogue harness-models <harness>`; it performs a live local rescan. Use `--kind configured` or `--kind available` to narrow the answer |
 | “Which model should I use?” | `catalogue recommend --task <task>` with free/provider filters requested |
-| “What models are in any installed harness?” | `catalogue harness-models <harness>`; it performs a live local rescan. Use `--kind configured` or `--kind available` to narrow the answer |
-| “Which model should I use?” | `catalogue recommend --task <task>` with free/provider filters requested |
 | “How do I configure model X with thinking in Grok?” | Run `catalogue grok-config <provider> <model>`. It returns a TOML `[model.*]` block for `~/.grok/config.toml` with the correct `api_backend = "messages"`, `reasoning_effort`, `base_url` (Anthropic endpoint), and `extra_headers`. Uses `harness_provider_support` data to match the correct backend per provider. |
 | “Which free models are working/last returned OK?” | `catalogue free-health-summary`, then `catalogue free-health`; use `--failures-only` when appropriate |
 | “Test all free models” | Run `free_model_health.py` through Hyperfine; targets must come only from `currently_free_provider_models` |
 | “What changed?” | `catalogue changes` and `catalogue monitor-status` |
+| “Accept/triage those changes” | `catalogue changes-review` with the same filters to preview, then `--note "<why>" --apply` only after Aubrey approves the exact set |
+| “What commands does AIMI have?” | `catalogue commands` returns a machine-readable manifest of every command, argument and whether it writes |
 | “Check database health” | `catalogue validate` and `catalogue doctor` |
 | “Prepare GitHub version” | `catalogue export`; report generated path and scan status |
 | Release date, pricing or capability claim | Query route/latest, then inspect evidence claims; cite primary source and date semantics. If new/different, present the conflict and obtain approval before any database write |
@@ -198,11 +200,27 @@ catalogue monitor
 catalogue ingest-subscriptions
 catalogue record-warp-tests
 catalogue changes --limit 50
+catalogue changes-review --provider openrouter --type pricing_changed
+catalogue changes-review --provider openrouter --type pricing_changed --note 'Reviewed with Aubrey' --apply
 catalogue monitor-status
 catalogue cron-runs
 catalogue validate
 catalogue export
+catalogue commands
+catalogue version
 ```
+
+## Maintenance scripts
+
+These write to the database and each takes its own timestamped backup. Run them deliberately, never while answering a routine question.
+
+| Script | Purpose | Safe to run anytime |
+|---|---|---|
+| `dump_schema.py` | Regenerate `schema_v2.sql` from the live database so fresh installs match | Yes, read-only unless the file changed |
+| `dump_schema.py --check` | Fail when the schema file and database have drifted | Yes |
+| `normalize_paths.py` | Rewrite stored evidence paths to project-relative form | Yes, idempotent |
+| `prune_snapshots.py` | Collapse byte-identical endpoint snapshots, verified by sha256 | Yes, refuses to delete on any hash mismatch |
+| `free_model_health.py` | Manual exact-OK probes against verified no-charge routes only | Only when a health refresh is wanted |
 
 ## Response requirements
 
