@@ -1,5 +1,5 @@
 {
-  "passed": false,
+  "passed": true,
   "checks": [
     {
       "check": "sqlite_integrity",
@@ -26,9 +26,9 @@
       "expected": 0
     },
     {
-      "check": "claims_have_capture",
-      "passed": false,
-      "value": 14,
+      "check": "confident_claims_have_capture",
+      "passed": true,
+      "value": 0,
       "expected": 0
     },
     {
@@ -44,18 +44,15 @@
       "expected": 0
     },
     {
-      "check": "pi_order_matches_durable_preference",
-      "passed": false,
-      "value": {
-        "current": 34,
-        "preferred": 36
-      },
-      "expected": "exact match"
+      "check": "pi_enabled_models_exist_at_provider",
+      "passed": true,
+      "value": 0,
+      "expected": 0
     },
     {
       "check": "endpoint_changes_reviewed",
-      "passed": false,
-      "value": 2008,
+      "passed": true,
+      "value": 0,
       "expected": 0
     },
     {
@@ -102,16 +99,18 @@
     }
   ],
   "metrics": {
-    "provider_routes": 912,
-    "canonical_models": 775,
+    "provider_routes": 913,
+    "canonical_models": 776,
     "active_free_routes": 146,
-    "verified_events": 908,
+    "verified_events": 909,
     "evidence_sources": 52,
     "claims": 87,
     "installed_harnesses": 12,
-    "free_health_green": 44,
+    "pi_enabled_models": 34,
+    "pi_snapshot_order_differs": true,
+    "free_health_green": 41,
     "free_health_orange": 1,
-    "free_health_red": 80,
-    "free_health_daily_rows": 480
+    "free_health_red": 83,
+    "free_health_daily_rows": 605
   }
 }

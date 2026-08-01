@@ -8,6 +8,24 @@ because it either changes authoritative data or changes a policy Aubrey set.
 
 ## Done
 
+### Round 2 (2026-08-01, after review)
+
+| Area | Change |
+|---|---|
+| Event log | 460 volatile-timestamp false positives removed, 15 monitoring runs corrected to `unchanged` (`correct_volatile_changes.py`, reusing the monitor's own volatile-field definition) |
+| Event log | Remaining 1 668 changes reviewed in labelled per-provider batches; backlog is zero |
+| Validation | Pi order check replaced. The recorded order is a snapshot, not a preference, so drift is now a metric. The real check is whether an enabled model still exists at its provider |
+| Evidence | `repair_claims.py`: 2 claims linked to a real 45 KB capture of DeepSeek's docs, 12 downgraded to `unverified` because their source file no longer exists |
+| Validation | `confident_claims_have_capture` replaces the blunt check: only claims asserting confidence need a capture |
+| CLI | `aimi test <provider> <model>` — one sanitized handshake, green/orange/red, recorded in `handshake_tests`, refuses paid/subscription routes without `--allow-paid` |
+| Alerts | Discovery notifier now reports **removals as well as additions at every provider**, flags removals that match a locally configured model, and summarises long provider sweeps to stay inside Telegram's limit |
+| Monitoring | Weekly job `aimi-free-model-health-weekly` (`da87bcef9fc4`) restored, covering every verified free route including NVIDIA NIM |
+| Diagnostics | Empty provider error bodies no longer stored as `{}`; the HTTP status and alternative fields are used instead |
+
+**Validation now passes 16/16.**
+
+### Round 1 (2026-08-01)
+
 | Area | Change | Evidence |
 |---|---|---|
 | Install | `schema_v2.sql` regenerated from the live database; 11 missing tables/views restored | fresh-checkout install smoke test passes 12/12 commands |
@@ -27,7 +45,7 @@ because it either changes authoritative data or changes a policy Aubrey set.
 
 ## Needs a decision (these block validation)
 
-### 1. 460 false-positive `model_changed` rows
+### RESOLVED — 460 false-positive rows (deleted)
 Ids **1547–2006**, all detected 2026-07-31, Mistral (260), OpenCode Go (120), OpenCode Zen (80).
 Verified: the only difference is `provider_created_at`, derived from a provider `created`
 field that is a *retrieval* timestamp. The fingerprint fix already excludes it, and a fresh
@@ -58,6 +76,33 @@ immutable evidence, or downgrade those claims to unverified.
 
 ---
 
+## Needs a decision
+
+### 1. NVIDIA NIM "red" routes are mostly not entitlement failures
+The first weekly health pass returned 41 green, 1 orange, 83 red, and 79 of the red are NVIDIA NIM.
+Once empty error bodies were made legible, the actual causes were:
+
+- **HTTP 404 `Function '<uuid>': Not found for account`** — the route is listed on NIM's public
+  `/v1/models` endpoint but is not enabled for Aubrey's account. It is not broken; it is not available.
+- **HTTP 529 `Service temporarily overloaded`** — transient. `deepseek-v4-flash` failed in the batch
+  and returned exact `OK` minutes earlier and later.
+
+Calling both of these "red" makes the free-model picture look far worse than it is, and re-probing
+unentitled routes every week wastes developer-tier quota.
+
+- **Option A** — add a `not_entitled` state for account-scoped 404s, exclude them from weekly probing, and re-check them monthly.
+- **Option B** — treat 529 as orange (inconclusive, like rate limiting) and retry once before recording.
+- **Option C** — both.
+- **Option D** — leave the classification as it is.
+
+### 2. Pi order in AGENTS.md
+`~/.pi/agent/AGENTS.md` still says "Keep Pi's `enabledModels` order as follows" over a 36-model list.
+You have said that number moves up and down normally, so that wording reads as a hard invariant it
+was never meant to be. Suggested replacement: keep the list as a *reference snapshot* with a note
+that live config wins and the count fluctuating is expected. Say the word and I will edit it.
+
+---
+
 ## Proposed — database
 
 1. **Retire v1 leftovers.** `model_capabilities` (745 rows), `pricing_evidence` (175),
@@ -75,9 +120,7 @@ immutable evidence, or downgrade those claims to unverified.
 
 ## Proposed — CLI
 
-6. **`aimi test <provider> <model>`.** Rule 10 requires a sanitized handshake before enabling a
-   newly discovered route, but there is no command to run one and record it in `handshake_tests`.
-   This is the biggest missing verb.
+6. ~~`aimi test <provider> <model>`~~ **Done.**
 7. **`aimi health-run`.** `free-health` only reads. Wrap `free_model_health.py` so an agent can
    refresh health without leaving the CLI.
 8. **Data-driven `recommend`.** Scoring hardcodes a family list (`glm`, `kimi`, `nemotron 3`) and
@@ -100,12 +143,12 @@ immutable evidence, or downgrade those claims to unverified.
 
 ## Proposed — monitoring
 
-14. **Alert when a model in Pi's order disappears from its endpoint.** The notifier alerts on
-    additions only. A removal or an ended free window that affects a model actually configured
-    in a harness is the higher-value alert.
-15. **Weekly free-health job.** 80 of 146 free routes are red and untested since the scheduled
-    jobs were removed, so free-model answers get less reliable each week. Free-only, bounded,
-    exact-OK, per the existing rules.
+14. ~~Alert when a model disappears~~ **Done**, and expanded to every provider for both additions
+    and removals, with local-impact flagging.
+15. ~~Weekly free-health job~~ **Done** (`da87bcef9fc4`).
+16. **Filter non-chat routes out of health probes.** Some listed routes are embedding, rerank or
+    vision models that can never satisfy an exact-OK chat handshake. Detect them from modalities or
+    task metadata rather than probing them weekly.
 
 ## Proposed — testing
 

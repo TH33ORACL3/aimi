@@ -37,6 +37,13 @@ def clean_error(body,status):
   payload=json.loads(body.decode('utf-8','replace'));msg=payload.get('error',{})
   if isinstance(msg,dict):msg=msg.get('message') or msg.get('code') or json.dumps(msg)
   elif not isinstance(msg,str):msg=json.dumps(msg)
+  # An empty error object told us nothing. Fall back to other common fields
+  # before giving up, so a failure is diagnosable instead of showing '{}'.
+  if msg in ('{}','[]','null',''):
+   for key in ('detail','message','title','type','status'):
+    value=payload.get(key)
+    if value:msg=value if isinstance(value,str) else json.dumps(value);break
+   else:msg=f'HTTP {status} with an empty error body'
  except Exception:msg=body.decode('utf-8','replace')
  msg=' '.join(str(msg or f'HTTP {status}').split())[:300]
  return msg

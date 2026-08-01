@@ -108,7 +108,7 @@ Install or refresh the skill and initialise the database with `python install.py
 7. **Preview risky writes.** Model changes preview by default. An explicit user request such as “add it,” “move it,” “remove it,” or “make it default” authorizes that exact write. Otherwise show the preview and request approval.
 8. **Preserve order by default.** If the user says only “add,” append the model. Move or set default only when requested. Never rewrite Aubrey's durable preferred order in AGENTS.md unless he explicitly asks to change that policy.
 9. **Back up and verify.** Pi writes must use `aimi`, which creates timestamped backups. After applying, run `catalogue scan`, `catalogue pi-order`, `catalogue order-diff pi`, and `catalogue validate`.
-10. **Test before enabling a newly discovered route.** Make one small sanitized API handshake when credentials are available. Record the result in `handshake_tests`; never store response secrets or full request headers.
+10. **Test before enabling a newly discovered route.** Run `catalogue test <provider> <model>`. It makes one small sanitized handshake, classifies the result green/orange/red, and records it in `handshake_tests`. It refuses paid, subscription-only and unclassified routes unless `--allow-paid` is given, so a test cannot quietly spend money or subscription quota. Never store response secrets or full request headers.
 11. **Never silently persist newly discovered information.** If an agent finds new model, provider, pricing, release, capability, harness, ranking, or availability information in any chat, treat it as a candidate finding only. Show Aubrey the evidence and ask for explicit confirmation before adding it to or changing it in the database. This is mandatory when the finding differs from, conflicts with, or would supersede existing database information. Do not suggest that the database was already updated, and do not write first and ask afterwards.
 12. **Make conflicts explicit before approval.** Present the current database value, proposed new value, source URL/type, evidence date, confidence, and affected records. Ask a short numbered confirmation such as: `1. Add/update it  2. Keep the database unchanged  3. Save as an unverified candidate only.` Only option 1 authorizes changing verified data. Option 3 may create an explicitly unverified candidate claim but must not alter the current authoritative value.
 13. **Do not auto-apply endpoint changes.** New endpoint records and free-window changes must be reviewed and confirmed by Aubrey before broad database or configuration changes.
@@ -117,7 +117,7 @@ Install or refresh the skill and initialise the database with `python install.py
 15. **Identify models by maker, not provider.** When Aubrey asks for models from a company or model family (for example, “OpenAI models”), search the canonical model identity/developer, display name, model identifier, and aliases across every harness and provider. Do not restrict the answer to providers whose name contains that company. For OpenAI, this must surface routes such as `openrouter/openai/gpt-oss-120b:free` even though the provider is OpenRouter, and any NVIDIA/OpenCode/Cloudflare/other route for the same OpenAI model.
 16. **Show every provider route for the same model.** When answering questions about a specific model — "latest free", "newest", "what's available" — always list **every provider route** (OpenRouter, OpenCode Zen, NVIDIA NIM, Cloudflare, etc.) for that model, not just the top result. Duplicate models across providers are relevant information and must be shown with their distinct evidence, pricing, and date semantics.
 17. **Ollama means cloud-only for Aubrey.** Use provider `ollama-cloud` and the official cloud endpoints `https://ollama.com/api/tags` or `https://ollama.com/v1/models`. For runtime tests, force `OLLAMA_HOST=https://ollama.com`. Do not catalogue, recommend, pull, benchmark, or configure locally hosted Ollama models unless Aubrey explicitly reverses this preference.
-18. **Periodic health probes are free-only and bounded.** Select targets exclusively from `currently_free_provider_models`; never probe paid, subscription-only, unknown-pricing, expired-window, or merely open-weight models. Use the exact prompt `Reply with exactly OK`, parallel bounded workers, and Hyperfine around the batch. Persist one upserted current status per route plus one compact daily aggregate per route, retaining only 30 days. Preserve `last_ok_at` even after later failures.
+18. **Periodic health probes are free-only and bounded.** Select targets exclusively from `currently_free_provider_models`; never probe paid, subscription-only, unknown-pricing, expired-window, or merely open-weight models. Use the exact prompt `Reply with exactly OK`, parallel bounded workers, and Hyperfine around the batch. Persist one upserted current status per route plus one compact daily aggregate per route, retaining only 30 days. Preserve `last_ok_at` even after later failures. The scheduled pass is the weekly Hermes job `aimi-free-model-health-weekly` (`da87bcef9fc4`), which covers every verified free route including NVIDIA NIM.
 19. **Use three health colours without conflating rate limits with failure.** `green` means the latest probe returned exact `OK`; `orange` means the latest probe was rate-limited (normally HTTP 429), so availability is inconclusive rather than failed; `red` means the latest probe was reachable but failed the exact-OK contract, returned another HTTP error, timed out, was unauthorized, or was otherwise unusable. Always show the detailed `last_status`, HTTP code, human-readable `result_description`, last-tested time, and last-OK time alongside the colour.
 20. **NVIDIA NIM uses an official free developer/evaluation tier.** Direct `nvidia-nim` routes are `free_tier_quota`, backed by NVIDIA's “free access ... for unlimited prototyping” and “Free serverless APIs for development” statements. Do not call this permanent zero-price production access. Preserve each route's detailed health result; test NVIDIA NIM weekly rather than every 12 hours to limit unnecessary evaluation usage.
 21. **Reviewing endpoint changes is a decision, not cleanup.** `aimi changes-review` previews by default and requires `--note` with `--apply`. Never bulk-mark the change log reviewed to make validation pass. Show Aubrey the breakdown by provider and change type first, and get approval for the exact set being accepted.
@@ -137,6 +137,7 @@ Install or refresh the skill and initialise the database with `python install.py
 | “What models are in any installed harness?” | `catalogue harness-models <harness>`; it performs a live local rescan. Use `--kind configured` or `--kind available` to narrow the answer |
 | “Which model should I use?” | `catalogue recommend --task <task>` with free/provider filters requested |
 | “How do I configure model X with thinking in Grok?” | Run `catalogue grok-config <provider> <model>`. It returns a TOML `[model.*]` block for `~/.grok/config.toml` with the correct `api_backend = "messages"`, `reasoning_effort`, `base_url` (Anthropic endpoint), and `extra_headers`. Uses `harness_provider_support` data to match the correct backend per provider. |
+| “Does this route actually work?” | `catalogue test <provider> <model>`. Report the colour, the exact reply or sanitized error, HTTP status and latency. Add `--allow-paid` only when Aubrey asks for a paid or subscription route |
 | “Which free models are working/last returned OK?” | `catalogue free-health-summary`, then `catalogue free-health`; use `--failures-only` when appropriate |
 | “Test all free models” | Run `free_model_health.py` through Hyperfine; targets must come only from `currently_free_provider_models` |
 | “What changed?” | `catalogue changes` and `catalogue monitor-status` |
@@ -172,6 +173,11 @@ catalogue where 'laguna-s-2.1'
 # Only rescan local harness files when that freshness is required
 catalogue where 'laguna-s-2.1' --refresh-harnesses
 catalogue recommend --task coding --free --limit 10
+
+# Handshake one route before enabling it
+catalogue test openrouter 'poolside/laguna-s-2.1:free'
+catalogue test nvidia-nim 'deepseek-ai/deepseek-v4-flash'
+catalogue test openai gpt-5.6-sol --allow-paid
 
 # Grok CLI thinking config: generates TOML for ~/.grok/config.toml
 catalogue grok-config deepseek deepseek-v4-flash
@@ -220,6 +226,8 @@ These write to the database and each takes its own timestamped backup. Run them 
 | `dump_schema.py --check` | Fail when the schema file and database have drifted | Yes |
 | `normalize_paths.py` | Rewrite stored evidence paths to project-relative form | Yes, idempotent |
 | `prune_snapshots.py` | Collapse byte-identical endpoint snapshots, verified by sha256 | Yes, refuses to delete on any hash mismatch |
+| `correct_volatile_changes.py` | Remove change events that differ only in volatile provider timestamps | Yes, reuses the monitor's own volatile-field definition |
+| `repair_claims.py` | Capture a claim's source, or mark the claim unverified when the source is gone | Yes, never upgrades confidence |
 | `free_model_health.py` | Manual exact-OK probes against verified no-charge routes only | Only when a health refresh is wanted |
 
 ## Response requirements

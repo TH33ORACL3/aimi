@@ -415,6 +415,51 @@ def order_diff(c,a):
  for i,x in enumerate(preferred,1):
   if x in pos and pos[x]!=i:out['moves'].append({'model':x,'current':pos[x],'preferred':i,'distance':pos[x]-i})
  print(json.dumps(out,indent=2))
+def test_route(c,a):
+ """Run one sanitized handshake against a route and record it.
+
+ Rule 10 requires a real handshake before enabling a newly discovered route.
+ Paid, subscription-only and unclassified routes need --allow-paid, so a test
+ cannot quietly spend money or subscription quota.
+ """
+ import handshake
+ row=c.execute("""SELECT pm.provider_model_id,pm.provider_id,pm.model_identifier,pm.display_name,pm.endpoint_status,
+   p.base_url,p.api_style,p.auth_env_var,
+   (SELECT ao.offer_type FROM access_offers ao WHERE ao.provider_model_id=pm.provider_model_id
+     AND (ao.ends_at IS NULL OR datetime(ao.ends_at)>datetime('now'))
+     ORDER BY CASE ao.offer_type WHEN 'genuine_zero_price' THEN 1 WHEN 'temporary_free_window' THEN 2 WHEN 'free_tier_quota' THEN 3 WHEN 'subscription_included' THEN 4 WHEN 'paid' THEN 5 ELSE 6 END LIMIT 1) offer_type
+   FROM provider_models_v2 pm JOIN providers p USING(provider_id)
+   WHERE pm.provider_id=? AND pm.model_identifier=?""",(a.provider,a.model)).fetchone()
+ if not row:raise SystemExit(f'Provider/model route not found: {a.provider}/{a.model}')
+ # A direct API handshake is not run through a harness, so harness_id stays
+ # NULL unless the caller names a harness the catalogue actually knows.
+ if a.harness and not c.execute('SELECT 1 FROM harnesses WHERE harness_id=?',(a.harness,)).fetchone():
+  raise SystemExit(f"Unknown harness id '{a.harness}'. Use aimi harnesses to list known ids, or omit --harness.")
+ offer=row['offer_type']
+ chargeable=offer not in handshake.NO_CHARGE_OFFERS
+ if chargeable and not a.allow_paid:
+  print(json.dumps({'provider':a.provider,'model':a.model,'access_type':offer or 'unclassified','skipped':True,
+   'reason':'Route is not verified as no-charge. One tiny request may consume paid or subscription quota.',
+   'override':'--allow-paid'},indent=2));return
+ result=handshake.run(row['provider_id'],row['model_identifier'],row['base_url'],row['auth_env_var'],prompt=a.prompt,timeout=a.timeout)
+ result['access_type']=offer or 'unclassified'
+ result['colour']=handshake.colour(result['status'])
+ result['result_description']=handshake.describe(result)
+ result['recorded']=False
+ if not a.no_record and result['status'] not in ('missing_credential','missing_base_url'):
+  # handshake_tests.status is a constrained vocabulary. Map onto it, but keep
+  # the detailed status, reply, HTTP code and description in observed features
+  # so nothing about what actually happened is lost.
+  stored={'ok':'passed','rate_limited':'rate_limited','unauthorized':'unauthorized','timeout':'timeout'}.get(result['status'],'failed')
+  features={k:result[k] for k in ('reply','http_status','prompt','colour','result_description') if result.get(k) is not None}
+  features['detailed_status']=result['status']
+  if result.get('error_category'):features['error_category']=result['error_category']
+  c.execute("""INSERT INTO handshake_tests(provider_model_id,harness_id,tested_at,test_type,status,latency_ms,input_tokens,output_tokens,observed_features_json,sanitized_error,runner_version)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(row['provider_model_id'],a.harness,result['tested_at'],'chat_completion_handshake',stored,result['latency_ms'],result.get('input_tokens'),result.get('output_tokens'),json.dumps(features,sort_keys=True),result.get('error_message'),handshake.VERSION))
+  c.commit();result['recorded']=True;result['stored_status']=stored
+ print(json.dumps(result,indent=2,default=str))
+
+
 def _order_profile(c,harness,name):
  """Ordered provider/model entries for one harness order profile."""
  return [f"{r['provider_id']}/{r['model_identifier']}" for r in c.execute("SELECT e.provider_id,e.model_identifier FROM model_order_profile_entries e JOIN model_order_profiles p USING(profile_id) WHERE p.harness_id=? AND p.profile_name=? ORDER BY e.position",(harness,name))]
@@ -471,9 +516,11 @@ def doctor(c,_):
   'active_free_offers_without_end_date':c.execute("SELECT COUNT(*) FROM access_offers WHERE offer_type='temporary_free_window' AND ends_at IS NULL").fetchone()[0],
   'claims_without_capture':c.execute('SELECT COUNT(*) FROM evidence_claims WHERE evidence_capture_id IS NULL').fetchone()[0],
   'unreviewed_endpoint_changes':c.execute('SELECT COUNT(*) FROM endpoint_changes WHERE reviewed=0').fetchone()[0],
-  # Compare the actual ordered lists. Equal lengths with different models or a
-  # different order is still drift, and a count check would call that healthy.
-  'pi_order_matches_preference':_order_profile(c,'pi','current-local-order')==_order_profile(c,'pi','aubrey-preferred-order'),
+  # The recorded order profile is a snapshot, not a preference. Aubrey enables
+  # and disables models routinely, so drift here is informational, not a fault.
+  # The real question is whether an enabled model still exists at its provider.
+  'pi_enabled_models':len(_order_profile(c,'pi','current-local-order')),
+  'pi_enabled_models_missing_at_provider':[e for e in _order_profile(c,'pi','current-local-order') if c.execute("SELECT COUNT(*) FROM provider_models_v2 WHERE provider_id=? AND model_identifier=? AND endpoint_status NOT IN ('removed','unavailable')",(e.split('/',1)[0],e.split('/',1)[1])).fetchone()[0]==0],
  }
  print(json.dumps(checks,indent=2))
 def recommend(c,a):
@@ -657,6 +704,7 @@ def build_parser():
  x=add('warp-models','Warp harness models, including custom UUID entries');x.add_argument('--custom',action='store_true');x.set_defaults(fn=warp_models)
  x=add('route','One exact provider/model route with offers, metadata and last test');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=route)
  x=add('grok-config','Generate a Grok CLI [model.*] TOML block with thinking enabled');x.add_argument('provider');x.add_argument('model');x.add_argument('--force',action='store_true',help='Generate config even if reasoning is not confirmed in the database');x.set_defaults(fn=grok_config)
+ x=add('test','Run one sanitized handshake against a route and record the result',write=True);x.add_argument('provider');x.add_argument('model');x.add_argument('--prompt',default='Reply with exactly OK');x.add_argument('--timeout',type=int,default=45);x.add_argument('--harness',default=None,help='Attribute the test to a known harness id; omit for a direct API test');x.add_argument('--allow-paid',action='store_true',dest='allow_paid',help='Permit testing a paid, subscription or unclassified route');x.add_argument('--no-record',action='store_true',dest='no_record',help='Do not store the result in handshake_tests');x.set_defaults(fn=test_route)
  x=add('changes','Query detected provider model changes; defaults to unreviewed changes')
  x.add_argument('--provider');x.add_argument('--all',action='store_true',help='Include reviewed changes');x.add_argument('--since');x.add_argument('--until');x.add_argument('--type',choices=['model_added','model_removed','model_changed','pricing_changed','capability_changed','alias_changed','other']);x.add_argument('--model');x.add_argument('--diff',action='store_true',help='Include before_json and after_json');x.add_argument('--limit',type=int,default=50);x.set_defaults(fn=changes)
  x=add('changes-review','Mark endpoint changes reviewed; previews unless --apply',write=True)

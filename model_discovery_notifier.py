@@ -31,7 +31,15 @@ MONITOR = PROJECT / 'monitor_endpoints.py'
 INGEST = PROJECT / 'ingest_endpoint_candidates.py'
 STATE = Path.home() / '.hermes' / 'cron' / 'model-catalogue-discovery-notifier.json'
 LOCK = Path.home() / '.hermes' / 'cron' / 'model-catalogue-discovery-notifier.lock'
-VERSION = 'model-catalogue-discovery-notifier/1.1'
+VERSION = 'model-catalogue-discovery-notifier/1.2'
+# Pi and some harnesses use a shortened provider label in their own config.
+# Map those onto catalogue provider ids so an impact match is exact rather than
+# a fuzzy substring, which produced false alarms during review.
+HARNESS_PROVIDER_ALIASES = {
+    'opencode': 'opencode-zen',
+    'nvidia': 'nvidia-nim',
+    'cloudflare-workers-ai': 'cloudflare-ai',
+}
 
 
 def now() -> str:
@@ -118,7 +126,8 @@ def parse_monitor_output(result: subprocess.CompletedProcess[str]) -> list[dict]
     return parsed
 
 
-def new_routes(connection: sqlite3.Connection, last_change_id: int) -> list[sqlite3.Row]:
+def route_rows(connection: sqlite3.Connection, last_change_id: int, change_type: str) -> list[sqlite3.Row]:
+    """Endpoint changes of one type newer than the watermark."""
     return connection.execute(
         """
         SELECT
@@ -160,33 +169,102 @@ def new_routes(connection: sqlite3.Connection, last_change_id: int) -> list[sqli
          AND pm.model_identifier = ec.model_identifier
         LEFT JOIN canonical_models cm ON cm.canonical_model_id = pm.canonical_model_id
         WHERE ec.endpoint_change_id > ?
-          AND ec.change_type = 'model_added'
+          AND ec.change_type = ?
         ORDER BY ec.endpoint_change_id
         """,
-        (last_change_id,),
+        (last_change_id, change_type),
     ).fetchall()
 
 
-def format_notification(routes: list[sqlite3.Row]) -> str:
-    lines = [f'New AI model route discovered in AIMI ({len(routes)}):', '']
-    for route in routes:
-        lines.extend(
-            [
-                f"• {route['model_name']}",
-                f"  Route: {route['provider_id']}/{route['model_identifier']}",
-                f"  Endpoint: {route['endpoint_url']}",
-                f"  First seen: {route['detected_at']}",
-                f"  Access: {route['access_type']}",
-            ]
-        )
-        if route['context_window_tokens'] is not None:
-            lines.append(f"  Context: {route['context_window_tokens']:,} tokens")
-        if route['max_output_tokens'] is not None:
-            lines.append(f"  Max output: {route['max_output_tokens']:,} tokens")
+def configured_models(connection: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every (provider, model) currently enabled in a locally installed harness."""
+    pairs: set[tuple[str, str]] = set()
+    for provider, model in connection.execute(
+        """SELECT e.configured_provider_name, e.configured_model_identifier
+           FROM harness_model_entries e
+           JOIN harness_installations i USING(installation_id)
+           WHERE e.enabled = 1 AND i.installed = 1"""
+    ):
+        if not provider or not model:
+            continue
+        pairs.add((HARNESS_PROVIDER_ALIASES.get(provider, provider), model))
+    return pairs
+
+
+def impact(route: sqlite3.Row, configured: set[tuple[str, str]]) -> bool:
+    """Exact provider and model match only. Suffix matching produced false alarms."""
+    return (route['provider_id'], route['model_identifier']) in configured
+
+
+# Telegram truncates long messages, and a provider withdrawing a whole family can
+# produce dozens of routes in one poll. Detail the first few, then summarise.
+DETAIL_LIMIT = 8
+
+
+def overflow(routes: list[sqlite3.Row], noun: str) -> list[str]:
+    extra = routes[DETAIL_LIMIT:]
+    if not extra:
+        return []
+    by_provider: dict[str, int] = {}
+    for route in extra:
+        by_provider[route['provider_id']] = by_provider.get(route['provider_id'], 0) + 1
+    summary = ', '.join(f'{provider} {count}' for provider, count in sorted(by_provider.items()))
+    return [f'...and {len(extra)} more {noun}(s): {summary}', '']
+
+
+def format_notification(added: list[sqlite3.Row], removed: list[sqlite3.Row], configured: set[tuple[str, str]]) -> str:
+    lines: list[str] = []
+
+    if added:
+        lines.append(f'New AI model routes discovered ({len(added)}):')
         lines.append('')
+        for route in added[:DETAIL_LIMIT]:
+            lines.extend(
+                [
+                    f"• {route['model_name']}",
+                    f"  Route: {route['provider_id']}/{route['model_identifier']}",
+                    f"  Endpoint: {route['endpoint_url']}",
+                    f"  First seen: {route['detected_at']}",
+                    f"  Access: {route['access_type']}",
+                ]
+            )
+            if route['context_window_tokens'] is not None:
+                lines.append(f"  Context: {route['context_window_tokens']:,} tokens")
+            if route['max_output_tokens'] is not None:
+                lines.append(f"  Max output: {route['max_output_tokens']:,} tokens")
+            lines.append('')
+        lines.extend(overflow(added, 'addition'))
+
+    if removed:
+        # A provider withdrawing a whole family produces a long list. Show the
+        # routes that actually affect a locally configured model first, so the
+        # actionable ones survive the detail limit.
+        ordered = sorted(removed, key=lambda route: not impact(route, configured))
+        affected = [route for route in removed if impact(route, configured)]
+        lines.append(f'Model routes removed from their provider ({len(removed)}):')
+        lines.append('')
+        for route in ordered[:DETAIL_LIMIT]:
+            lines.extend(
+                [
+                    f"• {route['model_name']}",
+                    f"  Route: {route['provider_id']}/{route['model_identifier']}",
+                    f"  Endpoint: {route['endpoint_url']}",
+                    f"  Last listed before: {route['detected_at']}",
+                ]
+            )
+            if impact(route, configured):
+                lines.append('  ** you have this configured locally **')
+            lines.append('')
+        lines.extend(overflow(ordered, 'removal'))
+        if affected:
+            lines.append(
+                f'{len(affected)} removed route(s) are still enabled in a local harness and will now fail.'
+            )
+            lines.append('')
+
     lines.extend(
         [
-            'This is an endpoint observation. AIMI has not treated it as the official release date.',
+            'These are endpoint observations. AIMI has not treated them as official release or retirement dates.',
             'Pricing, capabilities, and free status remain evidence-dependent.',
         ]
     )
@@ -242,7 +320,9 @@ def run_locked() -> int:
 
     connection = db_connection()
     current_max = max_change_id(connection)
-    routes = new_routes(connection, last_change_id)
+    added = route_rows(connection, last_change_id, 'model_added')
+    removed = route_rows(connection, last_change_id, 'model_removed')
+    configured = configured_models(connection)
     connection.close()
 
     save_state(
@@ -256,7 +336,8 @@ def run_locked() -> int:
     )
 
     failure_text = format_failures(results)
-    message_parts = [part for part in (format_notification(routes) if routes else '', failure_text) if part]
+    discovery_text = format_notification(added, removed, configured) if (added or removed) else ''
+    message_parts = [part for part in (discovery_text, failure_text) if part]
     if message_parts:
         print('\n\n'.join(message_parts))
 

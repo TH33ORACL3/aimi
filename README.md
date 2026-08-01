@@ -88,6 +88,9 @@ The main CLI is called `aimi`. It can search routes, compare providers, inspect 
 | `dump_schema.py` | Regenerates `schema_v2.sql` from the live database so fresh installs match |
 | `normalize_paths.py` | Rewrites stored evidence paths to project-relative form |
 | `prune_snapshots.py` | Collapses byte-identical endpoint snapshots, verified by sha256 |
+| `correct_volatile_changes.py` | Removes change events that differ only in volatile provider timestamps |
+| `repair_claims.py` | Captures a claim's source, or marks the claim unverified when the source is gone |
+| `handshake.py` | One sanitized provider handshake, used by `aimi test` |
 | `export_sanitized.py` | Creates a public database export with private state removed |
 | `schema_v2.sql` | Core model, provider, evidence, harness, and monitoring schema |
 | `evidence/` and `snapshots/` | Local raw evidence and endpoint captures, never committed |
@@ -122,6 +125,16 @@ Run `python install.py --upgrade` on an existing checkout to apply new schema ob
 `aimi where` returns every matching provider route, its access semantics, known limits, harness matches, freshness, and the latest test outcome when one exists.
 
 `aimi commands` returns a machine-readable manifest of every command, its arguments, and whether it writes. Agents should read that instead of guessing the surface.
+
+### Testing a route
+
+```bash
+./aimi test openrouter 'poolside/laguna-s-2.1:free'
+./aimi test nvidia-nim 'deepseek-ai/deepseek-v4-flash'
+./aimi test openai gpt-5.6-sol --allow-paid
+```
+
+One small handshake, classified green/orange/red, recorded in `handshake_tests` with the exact reply, HTTP status, latency and token counts. Paid, subscription-only and unclassified routes are refused unless `--allow-paid` is given, so a test cannot quietly spend money or subscription quota. Credentials, request headers and raw provider bodies are never stored, and any token-shaped text is redacted from errors.
 
 The CLI opens the database **read-only** for every command except `changes-review`, so a query can never damage the catalogue or block the endpoint monitor. Set `AIMI_DB` to point the CLI at a copy or an export.
 
@@ -191,7 +204,7 @@ Results use three states:
 - **Orange:** rate limited, so availability is inconclusive.
 - **Red:** failed, unauthorized, timed out, or returned something other than exact `OK`.
 
-The database keeps one current status per route and a bounded daily history. Free-model health checks are now manual and separate from the 15-minute discovery notification job. NVIDIA NIM developer-tier checks are also manual unless explicitly scheduled again.
+The database keeps one current status per route and a bounded daily history. Free-model health runs on the weekly Hermes job below, covering every verified no-charge route including NVIDIA NIM's developer tier. The scripts can also be run manually at any time.
 
 ```bash
 hyperfine --runs 1 --warmup 0 --show-output \
@@ -213,7 +226,15 @@ The consolidated Hermes discovery job is:
 model-catalogue-discovery-notifier (f8ff78fe2fb2)
 ```
 
-It runs every 15 minutes, polls all ten endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and delivers a Telegram notification only when a new model route is observed. It keeps a first-run watermark at `~/.hermes/cron/model-catalogue-discovery-notifier.json` so existing history is not replayed.
+It runs every 15 minutes, polls all ten endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and delivers a Telegram notification when a route is **added or removed at any provider**. Removals that match a model still enabled in a local harness are listed first and flagged, because those are the ones that will start failing. Long provider sweeps are summarised so the message stays within Telegram's limit. It keeps a first-run watermark at `~/.hermes/cron/model-catalogue-discovery-notifier.json` so existing history is not replayed.
+
+Free-model health runs weekly:
+
+```text
+aimi-free-model-health-weekly (da87bcef9fc4)
+```
+
+One weekly pass over every route the catalogue verifies as no-charge, including NVIDIA NIM's developer tier. It reports the green/orange/red counts and any status transitions since the previous run.
 
 Inspect it with:
 
@@ -221,7 +242,7 @@ Inspect it with:
 hermes cron runs f8ff78fe2fb2
 ```
 
-The former endpoint monitor and scheduled free-model health jobs have been removed. The free health scripts remain available for deliberate manual checks, but they are not part of the discovery notification loop.
+The former standalone endpoint monitor and the two older health jobs (12-hourly free health, weekly NVIDIA NIM) were consolidated into the two jobs above: one 15-minute discovery notifier and one weekly health pass.
 
 Query the complete change history without writing SQL:
 
