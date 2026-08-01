@@ -9,10 +9,13 @@ import hashlib,json,os,re,sqlite3,time,urllib.request,urllib.error
 from datetime import datetime,timezone
 from decimal import Decimal,InvalidOperation
 from pathlib import Path
+from aimi_credentials import load_aimi_credentials
+
+load_aimi_credentials()
 ROOT=Path(__file__).resolve().parent; DB=ROOT/'aimi.db'; SNAP=ROOT/'snapshots'/'monitor'; SNAP.mkdir(parents=True,exist_ok=True)
 NOW=datetime.now(timezone.utc).replace(microsecond=0).isoformat(); STAMP=NOW.replace(':','').replace('+00:00','Z')
 CONFIG={
- 'openrouter':('https://openrouter.ai/api/v1/models','OPENROUTER_API_KEY','data'),
+ 'openrouter':('https://openrouter.ai/api/v1/models','AIMI_OPENROUTER_API_KEY','data'),
  'opencode-zen':('https://opencode.ai/zen/v1/models','OPENCODE_API_KEY','data'),
  'opencode-go':('https://opencode.ai/zen/go/v1/models','OPENCODE_API_KEY','data'),
  'nvidia-nim':('https://integrate.api.nvidia.com/v1/models','NVIDIA_API_KEY','data'),

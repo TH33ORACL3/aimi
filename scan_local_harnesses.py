@@ -9,6 +9,9 @@ import hashlib, json, os, re, shutil, sqlite3, subprocess, tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
+from aimi_credentials import load_aimi_credentials
+
+load_aimi_credentials()
 ROOT=Path(__file__).resolve().parent
 DB=ROOT/'free_models.db'
 EVIDENCE=ROOT/'evidence'/'local'
@@ -366,7 +369,7 @@ def scan_grok(conn):
 
 
 def scan_credentials(conn):
-    mapping={'OPENAI_API_KEY':'openai','ANTHROPIC_API_KEY':'anthropic','GEMINI_API_KEY':'gemini','MISTRAL_API_KEY':'mistral','DEEPSEEK_API_KEY':'deepseek','NVIDIA_API_KEY':'nvidia-nim','OPENROUTER_API_KEY':'openrouter','OPENCODE_API_KEY':'opencode-zen','HF_TOKEN':'huggingface','GROQ_API_KEY':'groq','XAI_API_KEY':'xai','CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS':'cloudflare-ai'}
+    mapping={'OPENAI_API_KEY':'openai','ANTHROPIC_API_KEY':'anthropic','GEMINI_API_KEY':'gemini','MISTRAL_API_KEY':'mistral','DEEPSEEK_API_KEY':'deepseek','NVIDIA_API_KEY':'nvidia-nim','AIMI_OPENROUTER_API_KEY':'openrouter','OPENCODE_API_KEY':'opencode-zen','HF_TOKEN':'huggingface','GROQ_API_KEY':'groq','XAI_API_KEY':'xai','CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS':'cloudflare-ai'}
     for env,pid in mapping.items():
         pid=ensure_provider(conn,pid)
         conn.execute("INSERT OR REPLACE INTO credential_inventory(provider_id,machine_id,env_var_name,present,source_type,last_checked_at,notes) VALUES(?,?,?,?,?,?,?)",

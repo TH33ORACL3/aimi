@@ -62,6 +62,7 @@ On Windows, use `py` instead of `python` if required. The Python CLI is the port
 - **Windows:** Python 3.11+, SQLite via Python, and PowerShell or another agent shell are sufficient for the core CLI, database, validation, export, and catalogue scripts. Windows-specific harness paths are detected when available; missing harnesses are reported rather than invented.
 - **macOS/Linux:** Python 3.11+ is sufficient for the core CLI. `skills/scripts/catalogue` can be used from a POSIX shell. `hyperfine`, `zsh`, and Hermes are optional integrations used only by the relevant monitoring workflows.
 - **Provider access:** install the provider's own CLI or credentials only when you want to scan or test that provider. AIMI does not silently install agent harnesses or create API keys.
+- **AIMI-only OpenRouter access:** AIMI reads `AIMI_OPENROUTER_API_KEY` from `~/.config/aimi/credentials.env` (mode `0600`). This is deliberately separate from the global `OPENROUTER_API_KEY` used by other harnesses, so AIMI usage can be tracked independently in OpenRouter.
 
 ### Quick start
 
@@ -305,7 +306,7 @@ The latest machine-readable validation result is stored in `validation-report.js
 
 ## Privacy
 
-AIMI is designed around a private local catalogue with a safe public export. API-key values are not stored in the database. Raw evidence, snapshots, local configuration inventories, and the private database are excluded from the Git repository.
+AIMI is designed around a private local catalogue with a safe public export. API-key values are not stored in the database or repository. The AIMI-only OpenRouter key is kept outside the repository in `~/.config/aimi/credentials.env` with mode `0600`; only its environment-variable name is recorded in the catalogue. Raw evidence, snapshots, local configuration inventories, and the private database are excluded from the Git repository.
 
 ## Roadmap
 

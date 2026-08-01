@@ -18,6 +18,7 @@ metadata:
 - Pi live settings: `~/.pi/agent/settings.json`
 - Pi custom providers: `~/.pi/agent/models.json`
 - Durable Pi order: `~/.pi/agent/AGENTS.md`
+- AIMI-only OpenRouter credential: `~/.config/aimi/credentials.env` (mode `0600`, variable `AIMI_OPENROUTER_API_KEY`; value never printed or stored in SQLite)
 
 ## OpenCode subscription providers
 
@@ -104,7 +105,7 @@ Install or refresh the skill and initialise the database with `python install.py
 3b. **Keep OpenCode Go and Zen endpoint-specific.** Use provider ID `opencode-go` with `https://opencode.ai/zen/go/v1` for Go, and provider ID `opencode-zen` with `https://opencode.ai/zen/v1` for Zen. Never merge their model lists, pricing/access offers, endpoint telemetry, or health results.
 4. **Name the date semantics.** Provider `created` time, endpoint first-seen, announcement, GA, API availability, model-card publication, and weights release are different dates. Never collapse them into one release date.
 5. **Null means unknown.** Missing capability/context/output data is unverified, not unsupported.
-6. **Never expose secrets.** Do not print environment variables, complete config files, auth headers, tokens, or literal keys. Generated configuration must use `$ENV_VAR` references.
+6. **Never expose secrets.** Do not print environment variables, complete config files, auth headers, tokens, or literal keys. Generated configuration must use `$ENV_VAR` references. AIMI's OpenRouter route uses the dedicated `AIMI_OPENROUTER_API_KEY` from `~/.config/aimi/credentials.env`; do not substitute the global `OPENROUTER_API_KEY`.
 7. **Preview risky writes.** Model changes preview by default. An explicit user request such as “add it,” “move it,” “remove it,” or “make it default” authorizes that exact write. Otherwise show the preview and request approval.
 8. **Preserve order by default.** If the user says only “add,” append the model. Move or set default only when requested. Never rewrite Aubrey's durable preferred order in AGENTS.md unless he explicitly asks to change that policy.
 9. **Back up and verify.** Pi writes must use `aimi`, which creates timestamped backups. After applying, run `catalogue scan`, `catalogue pi-order`, `catalogue order-diff pi`, and `catalogue validate`.

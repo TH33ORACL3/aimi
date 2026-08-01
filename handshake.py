@@ -21,6 +21,10 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+from aimi_credentials import load_aimi_credentials
+
+load_aimi_credentials()
+
 VERSION = "aimi-handshake/1.0"
 PROMPT = "Reply with exactly OK"
 # Anything token-shaped is removed before an error is stored or printed.

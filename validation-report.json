@@ -1,5 +1,5 @@
 {
-  "passed": true,
+  "passed": false,
   "checks": [
     {
       "check": "sqlite_integrity",
@@ -51,8 +51,8 @@
     },
     {
       "check": "endpoint_changes_reviewed",
-      "passed": true,
-      "value": 0,
+      "passed": false,
+      "value": 3,
       "expected": 0
     },
     {

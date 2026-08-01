@@ -11,6 +11,9 @@ import urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from aimi_credentials import load_aimi_credentials
+
+load_aimi_credentials()
 ROOT=Path(__file__).resolve().parent
 DB=ROOT/'aimi.db'
 MIGRATION=ROOT/'free_model_health.sql'

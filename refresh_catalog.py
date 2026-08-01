@@ -15,6 +15,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from aimi_credentials import load_aimi_credentials
+
+load_aimi_credentials()
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "aimi.db"
 SNAPSHOTS = ROOT / "snapshots"
@@ -64,7 +67,7 @@ def pricing(provider: str, item: dict) -> tuple[str, int, str, str]:
 
 
 PROVIDERS = {
-    "openrouter": ("https://openrouter.ai/api/v1/models", "OPENROUTER_API_KEY"),
+    "openrouter": ("https://openrouter.ai/api/v1/models", "AIMI_OPENROUTER_API_KEY"),
     "opencode-zen": ("https://opencode.ai/zen/v1/models", "OPENCODE_API_KEY"),
     "nvidia-nim": ("https://integrate.api.nvidia.com/v1/models", "NVIDIA_API_KEY"),
     "deepseek": ("https://api.deepseek.com/v1/models", "DEEPSEEK_API_KEY"),
@@ -130,7 +133,7 @@ def main() -> int:
                 "openai": "https://api.openai.com/v1",
                 "gemini": "https://generativelanguage.googleapis.com/v1beta",
             }.get(provider)
-            auth = {"openrouter":"OPENROUTER_API_KEY","opencode-zen":"OPENCODE_API_KEY","nvidia-nim":"NVIDIA_API_KEY","deepseek":"DEEPSEEK_API_KEY","mistral":"MISTRAL_API_KEY","openai":"OPENAI_API_KEY","gemini":"GEMINI_API_KEY"}.get(provider)
+            auth = {"openrouter":"AIMI_OPENROUTER_API_KEY","opencode-zen":"OPENCODE_API_KEY","nvidia-nim":"NVIDIA_API_KEY","deepseek":"DEEPSEEK_API_KEY","mistral":"MISTRAL_API_KEY","openai":"OPENAI_API_KEY","gemini":"GEMINI_API_KEY"}.get(provider)
             conn.execute("""INSERT INTO models(model_id,provider,free_pricing,context_window,display_name,description,last_verified_at,catagory,category,pricing_status,pricing_unit,pricing_evidence,source_endpoint,api_style,base_url,auth_env_var,max_output_tokens,supports_reasoning,supports_tools,supports_structured_output,supports_streaming,verification_confidence)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(model_id) DO UPDATE SET provider=excluded.provider, free_pricing=excluded.free_pricing, context_window=COALESCE(excluded.context_window,models.context_window), display_name=excluded.display_name, description=excluded.description, last_verified_at=excluded.last_verified_at, catagory=excluded.catagory, category=excluded.category, pricing_status=excluded.pricing_status, pricing_unit=excluded.pricing_unit, pricing_evidence=excluded.pricing_evidence, source_endpoint=excluded.source_endpoint, api_style=excluded.api_style, base_url=excluded.base_url, auth_env_var=excluded.auth_env_var, max_output_tokens=COALESCE(excluded.max_output_tokens,models.max_output_tokens), supports_reasoning=COALESCE(excluded.supports_reasoning,models.supports_reasoning), supports_tools=COALESCE(excluded.supports_tools,models.supports_tools), supports_structured_output=COALESCE(excluded.supports_structured_output,models.supports_structured_output), verification_confidence=excluded.verification_confidence""",
