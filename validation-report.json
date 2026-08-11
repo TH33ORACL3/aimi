@@ -21,8 +21,8 @@
     },
     {
       "check": "verified_events_have_immutable_capture",
-      "passed": true,
-      "value": 0,
+      "passed": false,
+      "value": 2,
       "expected": 0
     },
     {
@@ -52,7 +52,7 @@
     {
       "check": "endpoint_changes_reviewed",
       "passed": false,
-      "value": 3,
+      "value": 3049,
       "expected": 0
     },
     {
@@ -69,8 +69,8 @@
     },
     {
       "check": "active_free_routes_have_health_status",
-      "passed": true,
-      "value": 0,
+      "passed": false,
+      "value": 2,
       "expected": 0
     },
     {
@@ -99,18 +99,18 @@
     }
   ],
   "metrics": {
-    "provider_routes": 913,
-    "canonical_models": 776,
-    "active_free_routes": 146,
-    "verified_events": 909,
-    "evidence_sources": 52,
-    "claims": 87,
-    "installed_harnesses": 12,
-    "pi_enabled_models": 34,
+    "provider_routes": 994,
+    "canonical_models": 822,
+    "active_free_routes": 169,
+    "verified_events": 971,
+    "evidence_sources": 59,
+    "claims": 93,
+    "installed_harnesses": 11,
+    "pi_enabled_models": 30,
     "pi_snapshot_order_differs": true,
-    "free_health_green": 41,
+    "free_health_green": 35,
     "free_health_orange": 1,
-    "free_health_red": 83,
-    "free_health_daily_rows": 605
+    "free_health_red": 89,
+    "free_health_daily_rows": 730
   }
 }
