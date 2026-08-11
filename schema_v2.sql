@@ -7,7 +7,7 @@
 PRAGMA foreign_keys=ON;
 BEGIN;
 
--- tables (35)
+-- tables (37)
 CREATE TABLE IF NOT EXISTS models (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_id TEXT NOT NULL UNIQUE,
@@ -543,6 +543,36 @@ CREATE TABLE IF NOT EXISTS provider_model_aliases (
   evidence_capture_id INTEGER REFERENCES evidence_captures(evidence_capture_id),
   UNIQUE(provider_model_id,alias)
  );
+CREATE TABLE IF NOT EXISTS provider_api_endpoints (
+  endpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_id TEXT NOT NULL REFERENCES providers(provider_id),
+  path TEXT NOT NULL,
+  method TEXT NOT NULL DEFAULT 'GET',
+  endpoint_kind TEXT NOT NULL,
+  purpose TEXT,
+  input_modalities TEXT,
+  output_modalities TEXT,
+  auth_required INTEGER NOT NULL DEFAULT 1,
+  endpoint_status TEXT NOT NULL DEFAULT 'available'
+    CHECK(endpoint_status IN ('available','unavailable','deprecated','removed','unknown')),
+  first_seen_at TEXT,
+  last_verified_at TEXT,
+  notes TEXT,
+  UNIQUE(provider_id, path, method)
+);
+CREATE TABLE IF NOT EXISTS provider_voices (
+        voice_id TEXT PRIMARY KEY,
+        provider_model_id INTEGER NOT NULL REFERENCES provider_models_v2(provider_model_id),
+        title TEXT NOT NULL,
+        description TEXT,
+        tags_json TEXT,
+        notable INTEGER NOT NULL DEFAULT 0,
+        verified INTEGER NOT NULL DEFAULT 0,
+        evidence_source_id INTEGER REFERENCES evidence_sources(evidence_source_id),
+        first_observed_at TEXT,
+        last_observed_at TEXT,
+        retrieved_at TEXT
+    );
 
 -- indexs (25)
 CREATE INDEX IF NOT EXISTS idx_provider ON models(provider);
