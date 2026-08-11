@@ -149,6 +149,11 @@ def run(provider_id: str, model_identifier: str, base_url: str | None, auth_env_
             body = response.read()
             result["http_status"] = response.status
         data = json.loads(body)
+        # Some OpenAI-compatible gateways (e.g. ClinePass) wrap the standard
+        # response in a {"data": {...}} envelope. Unwrap it so the reply is read
+        # from the same shape every other provider returns.
+        if isinstance(data, dict) and isinstance(data.get("data"), dict) and "choices" in data["data"]:
+            data = data["data"]
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         result["reply"] = sanitize(content, 200)
         usage = data.get("usage") or {}
