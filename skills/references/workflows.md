@@ -248,8 +248,9 @@ Unknown end dates must be reported as “duration unpublished,” not “free fo
 ```
 
 - The consolidated 15-minute Hermes job is `f8ff78fe2fb2`, named `model-catalogue-discovery-notifier`.
-- It polls the same 10 official model endpoints, runs `monitor_endpoints.py`, promotes endpoint-only candidates with `ingest_endpoint_candidates.py`, and sends Telegram only for newly observed `model_added` routes.
-- It is silent when there are no new model routes. Provider failures are surfaced as scheduler errors without exposing credential values.
+- It polls the same 10 official model endpoints, runs `monitor_endpoints.py`, promotes endpoint-only candidates with `ingest_endpoint_candidates.py`, and sends Telegram for newly observed `model_added` or `model_removed` routes.
+- It uses a durable pending outbox and `hermes send --json`; the endpoint watermark advances only after a successful delivery acknowledgement. Failed sends remain pending for the next run, with the outer Hermes Telegram delivery retained as a fallback.
+- It is silent when there are no new route or failure-transition notifications. Provider failures alert only on transition/change and recovery, not every repeated poll.
 - A first-run watermark suppresses historical changes; future changes are deduplicated in `~/.hermes/cron/model-catalogue-discovery-notifier.json`.
 - Raw payload hashes are preserved, but alerts use normalized stable fields.
 - Endpoint observations and endpoint-first-seen events may be written automatically. Do not infer official release dates, pricing, capabilities, or free access from an endpoint listing.

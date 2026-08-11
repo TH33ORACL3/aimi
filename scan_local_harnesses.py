@@ -49,6 +49,7 @@ PROVIDER_FACTS={
  'groq':('Groq','https://api.groq.com/openai/v1/models','https://api.groq.com/openai/v1','openai-completions','GROQ_API_KEY'),
  'huggingface':('Hugging Face','https://huggingface.co/api/models','https://router.huggingface.co/v1','openai-completions','HF_TOKEN'),
  'bedrock':('Amazon Bedrock','https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html','https://bedrock-runtime.{region}.amazonaws.com','aws-bedrock',None),
+ 'cline':('Cline','https://docs.cline.bot/getting-started/clinepass','https://api.cline.bot/api/v1','openai-completions','CLINE_API_KEY'),
 }
 ALIASES={'opencode':'opencode-zen','nvidia':'nvidia-nim'}
 
@@ -62,6 +63,7 @@ HARNESS_KNOWN={
  'antigravity-cli':('Antigravity CLI','CLI Agent','agy',Path.home()/'.gemini/antigravity-cli/settings.json',Path.home()/'.gemini/antigravity-cli/settings.json'),
  'cline':('Cline','CLI/IDE Agent','cline',Path.home()/'.cline/data/settings/providers.json',Path.home()/'.cline/data/settings/providers.json'),
  'aside':('Aside Browser Agent','Browser Agent','aside',Path.home()/'.aside/u/0/models.json',Path.home()/'.aside/u/0/models.json'),
+ 'zcode':('ZCode','Desktop Agent',None,Path.home()/'.zcode/v2/config.json',Path.home()/'.zcode/v2/config.json'),
  'claude-code':('Claude Code','CLI Agent','claude',Path.home()/'.claude',Path.home()/'.claude'),
  'obsidian-warp':('Warp / Oz','CLI Agent',None,Path.home()/'.warp/settings.toml',Path.home()/'.warp/settings.toml'),
  'grok-build':('Grok Build / Grok CLI','CLI Agent','grok',Path.home()/'.grok/config.toml',Path.home()/'.grok/config.toml'),
@@ -200,7 +202,17 @@ def scan_codex_available(conn,inst):
     except Exception:return
     for pos,m in enumerate(d.get('models',[]),1):
         mid=m.get('slug') or m.get('id') or m.get('model')
-        if mid:add_available(conn,inst,'openai-codex',mid,path,pos,m.get('display_name') or m.get('name'),{'visibility':m.get('visibility'),'fetched_at':d.get('fetched_at'),'client_version':d.get('client_version')})
+        if mid:
+            local_context = m.get('context_window') or m.get('max_context')
+            local_output = m.get('output_token_limit') or m.get('max_output_tokens')
+            add_available(conn,inst,'openai-codex',mid,path,pos,m.get('display_name') or m.get('name'),{
+                'visibility':m.get('visibility'),
+                'fetched_at':d.get('fetched_at'),
+                'client_version':d.get('client_version'),
+                'context_window_tokens':local_context,
+                'max_output_tokens':local_output,
+                'observation_scope':'Codex CLI local effective limit; not provider maximum',
+            })
 
 
 def scan_vibe(conn):
@@ -239,6 +251,94 @@ def scan_cline(conn):
         if mid:
             add_entry(conn,inst,pid,mid,pos,pid==d.get('lastUsedProvider'),None,src=path)
             add_available(conn,inst,pid,mid,path,pos,meta={'last_used':pid==d.get('lastUsedProvider')})
+
+def scan_claude_code(conn):
+    """Track the explicit Claude Code -> ClinePass launcher without secrets."""
+    path = Path.home() / '.claude'
+    inst = installation(conn, 'claude-code', 'Claude Code', 'CLI Agent', 'claude', path)
+    launcher = Path.home() / 'bin/claude-cline'
+    proxy = Path.home() / 'bin/claude-cline-proxy.py'
+    if not launcher.exists() or not proxy.exists():
+        return
+    try:
+        launcher_text = launcher.read_text()
+        proxy_text = proxy.read_text()
+    except OSError:
+        return
+    client_match = re.search(r'^MODEL="([^"]+)', launcher_text, re.MULTILINE)
+    # Proxy is generalized via env overrides; read the default from the call.
+    upstream_match = re.search(
+        r'^UPSTREAM_MODEL\s*=\s*os\.environ\.get\("CC_PROXY_MODEL",\s*"([^"]+)"\)',
+        proxy_text, re.MULTILINE)
+    if not upstream_match:
+        return
+    client_model = client_match.group(1) if client_match else None
+    upstream_model = upstream_match.group(1)
+    port_match = re.search(
+        r'^PORT\s*=\s*int\(os\.environ\.get\("CC_PROXY_PORT",\s*"(\d+)"\)',
+        proxy_text, re.MULTILINE)
+    metadata = {
+        'launcher_path': str(launcher),
+        'proxy_path': str(proxy),
+        'proxy_base_url': f'http://127.0.0.1:{port_match.group(1)}' if port_match else None,
+        'client_model': client_model,
+        'upstream_model': upstream_model,
+        'route': 'ClinePass subscription',
+    }
+    add_entry(conn, inst, 'cline', upstream_model, 1, True, None,
+              'ClinePass DeepSeek V4 Flash', src=launcher, meta=metadata)
+    add_available(conn, inst, 'cline', upstream_model, launcher, 1,
+                  'ClinePass DeepSeek V4 Flash', metadata)
+
+    # Second configured route: direct to OpenRouter's Anthropic Messages endpoint.
+    or_launcher = Path.home() / 'bin/claude-openrouter'
+    if not or_launcher.exists():
+        return
+    try:
+        or_text = or_launcher.read_text()
+    except OSError:
+        return
+    or_model = re.search(r'MODEL="\$\{CLAUDE_OPENROUTER_MODEL:-([^}]+)\}"', or_text)
+    base_match = re.search(r'ANTHROPIC_BASE_URL="([^"]+)"', or_text)
+    if not or_model:
+        return
+    model_id = or_model.group(1)
+    or_metadata = {
+        'launcher_path': str(or_launcher),
+        'base_url': base_match.group(1) if base_match else None,
+        'route': 'OpenRouter Anthropic Messages (direct, no proxy)',
+    }
+    add_entry(conn, inst, 'openrouter', model_id, 2, True, None,
+              'OpenRouter DeepSeek V4 Flash', src=or_launcher, meta=or_metadata)
+    add_available(conn, inst, 'openrouter', model_id, or_launcher, 2,
+                  'OpenRouter DeepSeek V4 Flash', or_metadata)
+
+    # Third configured route: FREE OpenCode Zen DeepSeek V4 Flash via the
+    # shared translation proxy (OpenAI-style upstream, so a proxy is required).
+    zen_launcher = Path.home() / 'bin/claude-opencode'
+    if not zen_launcher.exists():
+        return
+    try:
+        zen_text = zen_launcher.read_text()
+    except OSError:
+        return
+    zen_model = re.search(r'^MODEL="([^"]+)"', zen_text, re.MULTILINE)
+    zen_port = re.search(r'^PORT=(\d+)', zen_text, re.MULTILINE)
+    zen_upstream = re.search(r'CC_PROXY_UPSTREAM_URL="([^"]+)"', zen_text)
+    if not zen_model:
+        return
+    zen_metadata = {
+        'launcher_path': str(zen_launcher),
+        'proxy_path': str(proxy),
+        'proxy_base_url': f'http://127.0.0.1:{zen_port.group(1)}' if zen_port else None,
+        'upstream_url': zen_upstream.group(1) if zen_upstream else None,
+        'route': 'OpenCode Zen free (via translation proxy)',
+    }
+    add_entry(conn, inst, 'opencode-zen', zen_model.group(1), 3, True, None,
+              'OpenCode Zen DeepSeek V4 Flash Free', src=zen_launcher, meta=zen_metadata)
+    add_available(conn, inst, 'opencode-zen', zen_model.group(1), zen_launcher, 3,
+                  'OpenCode Zen DeepSeek V4 Flash Free', zen_metadata)
+
 
 def scan_aside(conn):
     path=Path.home()/'.aside/u/0/models.json'; inst=installation(conn,'aside','Aside Browser Agent','Browser Agent','aside',path)
@@ -368,8 +468,40 @@ def scan_grok(conn):
         add_available(conn, inst, pid, harness_mid, path, len(scanned_models), display_name, meta)
 
 
+def scan_zcode(conn):
+    # ZCode is a desktop coding harness that persists custom OpenAI-compatible
+    # providers in ~/.zcode/v2/config.json under provider.<key> with source=="custom".
+    # Each custom provider embeds a literal apiKey, baseURL and a models map.
+    path=Path.home()/'.zcode/v2/config.json'
+    inst=installation(conn,'zcode','ZCode','Desktop Agent',None,path)
+    if not path.exists():return
+    source(conn,path,'ZCode custom provider configuration','ZCode')
+    try:d=json.loads(path.read_text())
+    except Exception:return
+    prov=d.get('provider',{})
+    pos=0
+    for pkey,p in prov.items():
+        if not isinstance(p,dict):continue
+        if p.get('source')!='custom':continue
+        base=(p.get('options',{}) or {}).get('baseURL','')
+        # Derive the AIMI provider_id from the baseURL (substring match), since
+        # ZCode labels custom providers by a free-form key, not a provider id.
+        low=base.lower()
+        if 'api.cline.bot' in low: pid='cline'
+        elif 'opencode.ai/zen/go/v1' in low: pid='opencode-go'
+        elif 'opencode.ai/zen/v1' in low: pid='opencode-zen'
+        elif 'integrate.api.nvidia.com' in low: pid='nvidia-nim'
+        else: pid='custom'
+        for mid,m in p.get('models',{}).items():
+            pos+=1
+            lim=(m or {}).get('limit',{}); rz=(m or {}).get('reasoning',{}); mods=(m or {}).get('modalities',{})
+            meta={'name':p.get('name'),'pkey':pkey,'base_url':base,'enabled':p.get('enabled'),'reasoning_enabled':bool(rz.get('enabled')),'reasoning_variants':rz.get('variants'),'input_modalities':mods.get('input'),'output_modalities':mods.get('output')}
+            add_entry(conn,inst,pid,mid,pos,False,rz.get('defaultVariant') if rz else None,p.get('name'),lim.get('context'),lim.get('output'),path,meta)
+            add_available(conn,inst,pid,mid,path,pos,p.get('name'),meta)
+
+
 def scan_credentials(conn):
-    mapping={'OPENAI_API_KEY':'openai','ANTHROPIC_API_KEY':'anthropic','GEMINI_API_KEY':'gemini','MISTRAL_API_KEY':'mistral','DEEPSEEK_API_KEY':'deepseek','NVIDIA_API_KEY':'nvidia-nim','AIMI_OPENROUTER_API_KEY':'openrouter','OPENCODE_API_KEY':'opencode-zen','HF_TOKEN':'huggingface','GROQ_API_KEY':'groq','XAI_API_KEY':'xai','CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS':'cloudflare-ai'}
+    mapping={'OPENAI_API_KEY':'openai','ANTHROPIC_API_KEY':'anthropic','GEMINI_API_KEY':'gemini','MISTRAL_API_KEY':'mistral','DEEPSEEK_API_KEY':'deepseek','NVIDIA_API_KEY':'nvidia-nim','AIMI_OPENROUTER_API_KEY':'openrouter','OPENCODE_API_KEY':'opencode-zen','HF_TOKEN':'huggingface','GROQ_API_KEY':'groq','XAI_API_KEY':'xai','CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS':'cloudflare-ai','CLINE_API_KEY':'cline'}
     for env,pid in mapping.items():
         pid=ensure_provider(conn,pid)
         conn.execute("INSERT OR REPLACE INTO credential_inventory(provider_id,machine_id,env_var_name,present,source_type,last_checked_at,notes) VALUES(?,?,?,?,?,?,?)",
@@ -400,7 +532,7 @@ def main():
     for hid,(name,cat,cmd,cfg,_) in HARNESS_KNOWN.items(): installation(conn,hid,name,cat,cmd,cfg)
     # Preserve historical rows but mark them inactive unless observed again in this scan.
     conn.execute("UPDATE harness_model_entries SET enabled=0 WHERE installation_id IN (SELECT installation_id FROM harness_installations WHERE machine_id=?)",(MACHINE,))
-    scan_pi(conn); scan_droid(conn); scan_opencode(conn); scan_codex(conn); scan_cline(conn); scan_aside(conn); scan_vibe(conn); scan_antigravity(conn); scan_grok(conn); scan_warp(conn); scan_credentials(conn); preferred_pi_order(conn)
+    scan_pi(conn); scan_droid(conn); scan_opencode(conn); scan_codex(conn); scan_cline(conn); scan_claude_code(conn); scan_aside(conn); scan_zcode(conn); scan_vibe(conn); scan_antigravity(conn); scan_grok(conn); scan_warp(conn); scan_credentials(conn); preferred_pi_order(conn)
     conn.commit()
     print(json.dumps({'harnesses':conn.execute('SELECT COUNT(*) FROM harnesses').fetchone()[0],'installations':conn.execute('SELECT COUNT(*) FROM harness_installations').fetchone()[0],'configured_models':conn.execute('SELECT COUNT(*) FROM harness_model_entries').fetchone()[0],'rankings':conn.execute('SELECT COUNT(*) FROM user_rankings').fetchone()[0],'credential_presence_records':conn.execute('SELECT COUNT(*) FROM credential_inventory').fetchone()[0]},indent=2))
 if __name__=='__main__':main()

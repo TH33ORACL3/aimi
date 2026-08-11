@@ -108,7 +108,7 @@ Install or refresh the skill and initialise the database with `python install.py
 6. **Never expose secrets.** Do not print environment variables, complete config files, auth headers, tokens, or literal keys. Generated configuration must use `$ENV_VAR` references. AIMI's OpenRouter route uses the dedicated `AIMI_OPENROUTER_API_KEY` from `~/.config/aimi/credentials.env`; do not substitute the global `OPENROUTER_API_KEY`.
 7. **Preview risky writes.** Model changes preview by default. An explicit user request such as “add it,” “move it,” “remove it,” or “make it default” authorizes that exact write. Otherwise show the preview and request approval.
 8. **Preserve order by default.** If the user says only “add,” append the model. Move or set default only when requested. Never rewrite Aubrey's durable preferred order in AGENTS.md unless he explicitly asks to change that policy.
-9. **Back up and verify.** Pi writes must use `aimi`, which creates timestamped backups. After applying, run `catalogue scan`, `catalogue pi-order`, `catalogue order-diff pi`, and `catalogue validate`.
+9. **Back up and verify.** Pi writes must use `aimi`, which creates timestamped backups. After applying, run `catalogue scan`, `catalogue pi-order`, `catalogue order-diff pi`, and `python validate_catalogue.py`.
 10. **Test before enabling a newly discovered route.** Run `catalogue test <provider> <model>`. It makes one small sanitized handshake, classifies the result green/orange/red, and records it in `handshake_tests`. It refuses paid, subscription-only and unclassified routes unless `--allow-paid` is given, so a test cannot quietly spend money or subscription quota. Never store response secrets or full request headers.
 11. **Never silently persist newly discovered information.** If an agent finds new model, provider, pricing, release, capability, harness, ranking, or availability information in any chat, treat it as a candidate finding only. Show Aubrey the evidence and ask for explicit confirmation before adding it to or changing it in the database. This is mandatory when the finding differs from, conflicts with, or would supersede existing database information. Do not suggest that the database was already updated, and do not write first and ask afterwards.
 12. **Make conflicts explicit before approval.** Present the current database value, proposed new value, source URL/type, evidence date, confidence, and affected records. Ask a short numbered confirmation such as: `1. Add/update it  2. Keep the database unchanged  3. Save as an unverified candidate only.` Only option 1 authorizes changing verified data. Option 3 may create an explicitly unverified candidate claim but must not alter the current authoritative value.
@@ -138,13 +138,16 @@ Install or refresh the skill and initialise the database with `python install.py
 | “What models are in any installed harness?” | `catalogue harness-models <harness>`; it performs a live local rescan. Use `--kind configured` or `--kind available` to narrow the answer |
 | “Which model should I use?” | `catalogue recommend --task <task>` with free/provider filters requested |
 | “How do I configure model X with thinking in Grok?” | Run `catalogue grok-config <provider> <model>`. It returns a TOML `[model.*]` block for `~/.grok/config.toml` with the correct `api_backend = "messages"`, `reasoning_effort`, `base_url` (Anthropic endpoint), and `extra_headers`. Uses `harness_provider_support` data to match the correct backend per provider. |
+| “How do I add a model to Aside?” | Run `catalogue aside-fragment <provider> <model>` to preview the exact `~/.aside/u/0/models.json` provider block and `credentials.json` entry, then `catalogue aside-register <provider> <model> --apply` to write it (backs up both files; embeds the literal API key from the provider's `auth_env_var` when present). Reasoning-capable routes receive a `thinkingLevelMap` for `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`; `ultrabrowse` is selected separately with `aside --effort ultrabrowse` and remains subject to the Aside account plan. New providers need an Aside app restart (the daemon caches models.json at startup). Use `aside -m <provider>/<model>` to invoke the route — the separate `-p`/`-m` flags only resolve built-in providers. Remove with `catalogue aside-remove <provider> --apply`. |
+| “How does Claude Code use an OpenAI-only provider like Cline?” | Claude Code needs the Anthropic Messages API, so route it through the local translation proxy `~/bin/claude-cline-proxy.py` (port 8090, translates to ClinePass `/chat/completions`, upstream model `cline-pass/deepseek-v4-flash`). Launch explicitly with `~/bin/claude-cline`; the normal `claude` command remains routed to the OpenAI Codex proxy. Use the `cline-pass/`-prefixed model id to bill the subscription quota — the bare `deepseek/deepseek-v4-flash` id hits a daily free-tier cap (429). See `harness_provider_support` for `claude-code` + `cline`. |
+| “How do I change the model in <harness>?” | Run `catalogue harness-fragment <harness> <provider> <model>`. It returns the exact config fragment (path + format + apply steps) for that harness from the catalogue, so any agent can switch models in any harness quickly. Supported harnesses: pi, aside, grok-build, claude-code, droid, opencode, zcode, cline, mistral-vibe, antigravity-cli, codex-cli. The `harness_provider_support` table records the config schema for every (harness, provider) pair. |
 | “Does this route actually work?” | `catalogue test <provider> <model>`. Report the colour, the exact reply or sanitized error, HTTP status and latency. Add `--allow-paid` only when Aubrey asks for a paid or subscription route |
 | “Which free models are working/last returned OK?” | `catalogue free-health-summary`, then `catalogue free-health`; use `--failures-only` when appropriate |
 | “Test all free models” | Run `free_model_health.py` through Hyperfine; targets must come only from `currently_free_provider_models` |
 | “What changed?” | `catalogue changes` and `catalogue monitor-status` |
 | “Accept/triage those changes” | `catalogue changes-review` with the same filters to preview, then `--note "<why>" --apply` only after Aubrey approves the exact set |
 | “What commands does AIMI have?” | `catalogue commands` returns a machine-readable manifest of every command, argument and whether it writes |
-| “Check database health” | `catalogue validate` and `catalogue doctor` |
+| “Check database health” | `python validate_catalogue.py` and `catalogue doctor` |
 | “Prepare GitHub version” | `catalogue export`; report generated path and scan status |
 | Release date, pricing or capability claim | Query route/latest, then inspect evidence claims; cite primary source and date semantics. If new/different, present the conflict and obtain approval before any database write |
 
@@ -202,6 +205,22 @@ catalogue pi-add-latest-free --provider openrouter
 catalogue pi-add-latest-free --provider openrouter --apply
 catalogue pi-remove openrouter 'poolside/laguna-s-2.1:free' --apply
 
+# Aside custom provider config: generates ~/.aside/u/0/models.json + credentials.json
+catalogue aside-fragment cline deepseek/deepseek-v4-flash
+catalogue aside-register cline deepseek/deepseek-v4-flash
+catalogue aside-register cline deepseek/deepseek-v4-flash --apply
+catalogue aside-remove cline --apply
+
+# Change the model in ANY harness: returns the exact config fragment to apply
+catalogue harness-fragment pi openrouter 'poolside/laguna-s-2.1:free'
+catalogue harness-fragment claude-code cline deepseek/deepseek-v4-flash
+catalogue harness-fragment aside cline deepseek/deepseek-v4-flash
+catalogue harness-fragment grok-build deepseek deepseek-v4-flash
+catalogue harness-fragment droid cline deepseek/deepseek-v4-flash
+catalogue harness-fragment opencode cline deepseek/deepseek-v4-flash
+catalogue harness-fragment zcode nvidia-nim 'deepseek-ai/deepseek-v4-flash-0731'
+catalogue harness-fragment codex-cli openai gpt-5.6-sol
+
 # Monitoring and maintenance
 catalogue monitor
 catalogue ingest-subscriptions
@@ -211,7 +230,7 @@ catalogue changes-review --provider openrouter --type pricing_changed
 catalogue changes-review --provider openrouter --type pricing_changed --note 'Reviewed with Aubrey' --apply
 catalogue monitor-status
 catalogue cron-runs
-catalogue validate
+python validate_catalogue.py
 catalogue export
 catalogue commands
 catalogue version
@@ -239,7 +258,7 @@ These write to the database and each takes its own timestamped backup. Run them 
 - For company/model-maker questions, use the catalogue's complete route result and match against canonical developer/company, canonical name, display name, aliases, and identifiers. Report every matching route, regardless of provider, and explicitly distinguish the company that made the model from the provider hosting it.
 - `catalogue harnesses` and `catalogue harness-models <harness>` perform a live local rescan before answering. Treat local configuration/availability files as authoritative for the harness question, not stale catalogue rows. Use `--kind configured` or `--kind available` when the user asks for only one category.
 - For Codex CLI specifically, configured models come from `~/.codex/config.toml` and available models come from `~/.codex/models_cache.json`; do not substitute the broader provider catalogue.
-- Other current local sources include Pi (`~/.pi/agent/settings.json`, `~/.pi/agent/models.json`), Droid (`~/.factory/settings.json`), OpenCode (`~/.config/opencode/opencode.json`), Cline (`~/.cline/data/settings/providers.json`), Aside account 0 (`~/.aside/u/0/models.json`), Antigravity (`~/.gemini/antigravity-cli/settings.json`), and Mistral Vibe (`~/.vibe/config.toml`). If no model source is present, report “no local model list detected” instead of inferring models from provider metadata.
+- Other current local sources include Pi (`~/.pi/agent/settings.json`, `~/.pi/agent/models.json`), Droid (`~/.factory/settings.json`), OpenCode (`~/.config/opencode/opencode.json`), ZCode (`~/.zcode/v2/config.json` — desktop app `dev.zcode.app`; custom OpenAI-compatible providers live under `provider.<key>` with `source=="custom"`, a literal `options.apiKey`, `options.baseURL`, and a `models` map), Cline (`~/.cline/data/settings/providers.json`), Aside account 0 (`~/.aside/u/0/models.json`), Antigravity (`~/.gemini/antigravity-cli/settings.json`), and Mistral Vibe (`~/.vibe/config.toml`). If no model source is present, report “no local model list detected” instead of inferring models from provider metadata.
 - For latest/free answers, include exact model ID, provider, free-offer type, verification time, provider-created or first-seen time, context/output limits when known, whether it is already configured, and the latest test outcome whenever a test exists. Never report only a `last_tested_at` timestamp without its status/result.
 - When an official endpoint supplies them, also expose the route description, max input limit, normalized reasoning/tool/function-calling/structured-output/streaming flags, modalities, tokenizer/quantization, aliases, provider canonical slug, Hugging Face ID, supported reasoning efforts, and the complete sanitised endpoint metadata. Keep missing values unknown rather than treating them as unsupported.
 - For OpenCode Go or Zen answers, always show the exact provider ID and endpoint, label subscription-included, pay-as-you-go, and genuinely free models separately, and never substitute the other OpenCode product's model list.
@@ -285,3 +304,4 @@ hyperfine --runs 1 --warmup 0 --show-output \
 - [Operational workflows](references/workflows.md)
 - [Command and SQL cookbook](references/operations.md)
 - [Schema and evidence semantics](references/schema.md)
+- [Changing the model in any harness](references/harness-config.md)

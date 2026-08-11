@@ -162,6 +162,53 @@ The scanner reads the local sources used by each harness, including Pi, Droid, O
 
 Writes preview by default. Applying a change creates a timestamped backup, then the local configuration is rescanned and validated.
 
+### Aside custom provider configuration
+
+Aside (browser agent) reads custom OpenAI-compatible providers from `~/.aside/u/0/models.json`, with the API key in `~/.aside/u/0/credentials.json`. AIMI generates and applies that config for any catalogue route:
+
+```bash
+./aimi aside-fragment cline deepseek/deepseek-v4-flash
+./aimi aside-register cline deepseek/deepseek-v4-flash
+./aimi aside-register cline deepseek/deepseek-v4-flash --apply
+./aimi aside-remove cline --apply
+```
+
+`aside-fragment` returns the exact `models.json` provider block and `credentials.json` entry for a route, plus the CLI invocation. `aside-register` previews by default; `--apply` writes both files with timestamped backups and embeds the literal API key from the provider's `auth_env_var` when it is present in the environment (the Aside daemon does not expand `$ENV` references from the app launch environment). New custom providers require an Aside app restart, because the daemon caches `models.json` at startup. Invoke a registered route with the combined form `aside -m <provider>/<model>` — the separate `-p <provider> -m <model>` flags only resolve built-in providers. The per-provider schema is recorded in `harness_provider_support` for `aside`. For catalogue routes marked as reasoning-capable, the generated model entry includes Aside's `thinkingLevelMap` for `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. `ultrabrowse` is an Aside proactive mode rather than a model-map value; verify it with `aside --effort ultrabrowse` after restarting the app. Aside's account plan still controls whether Ultrabrowse is genuinely unlocked; a custom model JSON entry cannot bypass that plan gate.
+
+### Claude Code provider routing
+
+Claude Code speaks only the Anthropic Messages API, so OpenAI-compatible providers (like ClinePass) need a local translation proxy. The setup for routing Claude Code to ClinePass (DeepSeek V4 Flash under the subscription) is:
+
+- `~/bin/claude-cline-proxy.py` — local proxy on port 8090 that translates Anthropic `/v1/messages` (streaming SSE, tool use, `role:system`) to ClinePass `/chat/completions`. It reads the ClinePass key from `$CLINE_API_KEY` and routes to the ClinePass subscription model id `cline-pass/deepseek-v4-flash`. (The bare `deepseek/deepseek-v4-flash` id is a free-tier bucket with a daily cap — `INFERENCE_CAP_ERROR` 429 — so the `cline-pass/` prefix is required to bill the subscription quota.)
+- `~/bin/claude-cline` — launcher that ensures the proxy is running and sets `ANTHROPIC_BASE_URL=http://127.0.0.1:8090`, `ANTHROPIC_MODEL=deepseek-v4-flash`, and the `ANTHROPIC_DEFAULT_*` aliases, then execs `claude`.
+- `~/bin/claude-cline` — the explicit launcher for this route. The normal `claude` command remains routed to the OpenAI Codex proxy via `claude-codex`; it does not silently switch to ClinePass. The prior DeepSeek direct routing is preserved as comments for revert.
+
+The per-provider schema is recorded in `harness_provider_support` for `claude-code` + `cline`.
+
+### Changing the model in any harness
+
+To point any harness at any provider/model route quickly, use the unified generator:
+
+```bash
+./aimi harness-fragment <harness> <provider> <model>
+```
+
+It returns the exact config fragment (config path, format, apply steps) for the target
+harness, driven by the `harness_provider_support` table and the catalogue route data
+(base URL, API style, auth env var, context, max tokens). Supported harnesses: `pi`,
+`aside`, `grok-build`, `claude-code`, `droid`, `opencode`, `cline`, `mistral-vibe`,
+`antigravity-cli`, `codex-cli`. Example:
+
+```bash
+./aimi harness-fragment claude-code cline deepseek/deepseek-v4-flash
+./aimi harness-fragment pi openrouter 'poolside/laguna-s-2.1:free'
+./aimi harness-fragment grok-build deepseek deepseek-v4-flash
+```
+
+The per-harness config recipes and privacy rules are documented in
+`skills/references/harness-config.md`. Secrets stay out of the catalogue — fragments
+reference the provider's `auth_env_var` name, never the key value.
+
 ### Subscriptions and harness-specific access
 
 ```bash
@@ -227,7 +274,13 @@ The consolidated Hermes discovery job is:
 model-catalogue-discovery-notifier (f8ff78fe2fb2)
 ```
 
-It runs every 15 minutes, polls all ten endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and delivers a Telegram notification when a route is **added or removed at any provider**. Removals that match a model still enabled in a local harness are listed first and flagged, because those are the ones that will start failing. Long provider sweeps are summarised so the message stays within Telegram's limit. It keeps a first-run watermark at `~/.hermes/cron/model-catalogue-discovery-notifier.json` so existing history is not replayed.
+It runs every 15 minutes, polls all ten endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and notifies Telegram when a route is **added or removed at any provider**. Removals that match a model still enabled in a local harness are listed first and flagged, because those are the ones that will start failing. Long provider sweeps are summarised and bounded below Telegram's message limit. Discovery cards use Telegram Markdown formatting and show route, endpoint, local first-seen time, access classification, and the available context/capability metadata. Times default to `Africa/Johannesburg` (`SAST`); set `AIMI_LOCAL_TIMEZONE` only when the notification recipient's timezone changes.
+
+Delivery is durable and retry-safe. The watcher writes a pending outbox item before sending through `hermes send --json`, retries the send, and advances `last_change_id` only after Hermes reports success. A failed delivery leaves the alert pending for the next run. The outer Hermes `deliver: telegram` setting remains as a failure fallback. The state file at `~/.hermes/cron/model-catalogue-discovery-notifier.json` is atomic, private, and carries the delivery attempt/result metadata. Delivery is at-least-once: a crash immediately after Telegram accepts a message can cause one duplicate, but cannot silently lose an alert.
+
+The Hermes shell entrypoint pins a Python 3.11+ interpreter instead of relying on launchd's `/usr/bin/python3`, which is too old for the AIMI code. It fails clearly if no supported interpreter exists.
+
+Provider failures are reported only when they first occur, change, or recover. The watcher remains quiet when a known provider failure repeats, so one persistent outage cannot bury real model discoveries. The notifier does not test model responses; free-only health checks remain a separate weekly job.
 
 Free-model health runs weekly:
 

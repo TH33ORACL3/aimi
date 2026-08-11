@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse,json,os,sqlite3,sys,shutil,subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from aimi_credentials import load_aimi_credentials
 VERSION='aimi/1.2.0'
 ROOT=Path(__file__).resolve().parent; HOME=Path.home()
 # AIMI_DB lets an agent point the CLI at a copy, an export, or a test database
@@ -564,26 +565,145 @@ def pi_remove(c,a):
  out={'entry':entry,'before_position':before.index(entry)+1,'apply':a.apply}
  if a.apply:out['backup']=str(write_pi_settings(path,d))
  print(json.dumps(out,indent=2))
-def grok_config(c,a):
-    """Generate a Grok config.toml [model.*] block with thinking enabled for a provider/model route."""
+# Aside (browser agent) custom provider config. The daemon caches models.json at
+# startup, so a newly added provider needs an app restart, and the combined
+# `aside -m <provider>/<model>` form is how the CLI resolves custom providers.
+ASIDE_DIR=HOME/'.aside'/'u'/'0'
+ASIDE_MODELS_PATH=ASIDE_DIR/'models.json'
+ASIDE_CREDENTIALS_PATH=ASIDE_DIR/'credentials.json'
+ASIDE_COMPAT={'supportsStore':False,'supportsDeveloperRole':False,'supportsReasoningEffort':False,'maxTokensField':'max_tokens','supportsStrictMode':False,'supportsLongCacheRetention':False}
+# Aside exposes the extended reasoning selector from this map. `ultrabrowse`
+# is a separate proactive mode supplied by Aside, not a provider model key.
+ASIDE_THINKING_LEVEL_MAP={level: level for level in ('off','minimal','low','medium','high','xhigh','max')}
+ASIDE_DEFAULT_CONTEXT=128000
+ASIDE_DEFAULT_MAX_TOKENS=16384
+
+def aside_provider_fragment(c,pid,mid):
+ row=c.execute("""SELECT pm.provider_id,pm.model_identifier,pm.display_name,pm.reasoning,
+   pm.context_window_tokens,pm.max_output_tokens,pm.input_modalities_json,
+   p.display_name provider_name,p.base_url,p.api_style,p.auth_env_var
+   FROM provider_models_v2 pm JOIN providers p USING(provider_id)
+   WHERE pm.provider_id=? AND pm.model_identifier=?""",(pid,mid)).fetchone()
+ if not row:raise SystemExit(f'Provider/model route not found: {pid}/{mid}')
+ api=row['api_style'] or 'openai-completions';env=row['auth_env_var']
+ try:inputs=json.loads(row['input_modalities_json']) if row['input_modalities_json'] and row['input_modalities_json'].strip().startswith('[') else ['text']
+ except (TypeError,json.JSONDecodeError):inputs=['text']
+ model={'id':mid,'name':row['display_name'] or mid,'reasoning':bool(row['reasoning']),'thinkingLevelMap':ASIDE_THINKING_LEVEL_MAP if row['reasoning'] else None,'input':inputs,'contextWindow':row['context_window_tokens'] or ASIDE_DEFAULT_CONTEXT,'maxTokens':row['max_output_tokens'] or ASIDE_DEFAULT_MAX_TOKENS}
+ model={k:v for k,v in model.items() if v is not None}
+ provider={'name':row['provider_name'] or pid,'baseUrl':row['base_url'],'api':api,'authHeader':bool(env),'compat':ASIDE_COMPAT,'models':[model]}
+ if env:provider['apiKey']=f'${env}'
+ cred={pid:{'type':'api_key','key':f'${env}'}} if env else None
+ return pid,provider,cred,model
+
+def aside_fragment(c,a):
+ pid,provider,cred,model=aside_provider_fragment(c,a.provider,a.model)
+ print(json.dumps({'provider':pid,'model':a.model,'cli_invocation':f'aside -m {pid}/{a.model}','aside_models_json':{'providers':{pid:provider}},'aside_credentials_json':cred,'notes':['Use the combined `-m <provider>/<model>` form; the separate `-p <provider> -m <model>` flags only resolve built-in providers.','Requires an Aside app restart to load a newly added custom provider (the daemon caches models.json at startup).','The API key must be a literal value in models.json or credentials.json; the Aside daemon does not expand $ENV references from the app launch environment.']},indent=2))
+
+def _aside_backup(path):
+ if not path.exists():return None
+ backup=path.with_name(path.name+f'.bak.aside-{datetime.now().strftime("%Y%m%d-%H%M%S-%f")}')
+ shutil.copy2(path,backup);return str(backup)
+
+
+def _aside_load_json(path,default):
+ if not path.exists():return default
+ try:return json.loads(path.read_text())
+ except (OSError,json.JSONDecodeError) as exc:raise SystemExit(f'Invalid Aside JSON at {path}: {exc}')
+
+
+def _aside_write_json(path,data):
+ path.write_text(json.dumps(data,indent=2)+'\n')
+ json.loads(path.read_text())
+
+
+def _aside_update_settings(provider,model,effort=None):
+ path=ASIDE_DIR/'settings.json';d=_aside_load_json(path,{})
+ current=d.get('defaultModel') if isinstance(d.get('defaultModel'),dict) else {}
+ selected_effort=effort or (current.get('thinkingLevel') if current.get('provider')==provider and current.get('modelId')==model else 'high')
+ if selected_effort not in ASIDE_THINKING_LEVEL_MAP:
+  raise SystemExit(f'Aside effort must be one of: {", ".join(ASIDE_THINKING_LEVEL_MAP)}; ultrabrowse is a separate proactive mode')
+ d['defaultModel']={'provider':provider,'modelId':model,'thinkingLevel':selected_effort,'fastMode':bool(current.get('fastMode',False))}
+ return path,d
+
+
+def _aside_apply_model(c,pid,mid,set_default=False,effort=None):
+ pid,provider,cred,model=aside_provider_fragment(c,pid,mid)
+ row=c.execute('SELECT p.auth_env_var FROM providers p WHERE p.provider_id=?',(pid,)).fetchone()
+ env=row['auth_env_var'] if row else None;key=os.getenv(env) if env else None
+ if key:
+  provider['apiKey']=key;cred={pid:{'type':'api_key','key':key}}
+ if not ASIDE_DIR.exists():raise SystemExit(f'Aside account dir not found: {ASIDE_DIR}')
+ models_d=_aside_load_json(ASIDE_MODELS_PATH,{'providers':{}})
+ cred_d=_aside_load_json(ASIDE_CREDENTIALS_PATH,{})
+ providers=models_d.setdefault('providers',{})
+ cur=providers.get(pid)
+ backups=[]
+ for path in (ASIDE_MODELS_PATH,ASIDE_CREDENTIALS_PATH):
+  backup=_aside_backup(path)
+  if backup:backups.append(backup)
+ if isinstance(cur,dict) and cur:
+  merged=dict(cur);merged['models']=[m for m in cur.get('models',[]) if m.get('id')!=mid]+[model]
+  if key:merged['apiKey']=key
+  providers[pid]=merged
+ else:providers[pid]=provider
+ _aside_write_json(ASIDE_MODELS_PATH,models_d)
+ if cred:
+  cred_d[pid]=cred[pid];_aside_write_json(ASIDE_CREDENTIALS_PATH,cred_d)
+ settings_backup=None;settings_path=None;default_before=None;default_after=None
+ if set_default:
+  settings_path,settings_d=_aside_update_settings(pid,mid,effort)
+  default_before=_aside_load_json(settings_path,{}).get('defaultModel')
+  settings_backup=_aside_backup(settings_path);_aside_write_json(settings_path,settings_d)
+  default_after=settings_d['defaultModel']
+  if settings_backup:backups.append(settings_backup)
+ return {'provider':pid,'model':mid,'path':str(ASIDE_MODELS_PATH),'credentials_path':str(ASIDE_CREDENTIALS_PATH),'backups':backups,'api_key_embedded':bool(key),'api_key_source':f'env {env}' if key else (f'env placeholder ${env}' if env else 'no key required'),'cli_invocation':f'aside -m {pid}/{mid}','default_before':default_before,'default_after':default_after,'default_updated':set_default,'settings_path':str(settings_path) if settings_path else None,'model':model}
+
+
+def aside_register(c,a):
+ pid,provider,cred,model=aside_provider_fragment(c,a.provider,a.model)
+ existing=_aside_load_json(ASIDE_MODELS_PATH,{'providers':{}}).get('providers',{})
+ already={'provider':pid in existing,'model':any(m.get('id')==a.model for m in existing.get(pid,{}).get('models',[])) if isinstance(existing.get(pid),dict) else False}
+ out={'provider':pid,'model':a.model,'apply':a.apply,'path':str(ASIDE_MODELS_PATH),'credentials_path':str(ASIDE_CREDENTIALS_PATH),'already_registered':already,'api_key_source':f'env {c.execute("SELECT auth_env_var FROM providers WHERE provider_id=?",(pid,)).fetchone()[0]}' if c.execute("SELECT auth_env_var FROM providers WHERE provider_id=?",(pid,)).fetchone() and c.execute("SELECT auth_env_var FROM providers WHERE provider_id=?",(pid,)).fetchone()[0] else 'no key required','cli_invocation':f'aside -m {pid}/{a.model}'}
+ if a.apply:
+  applied=_aside_apply_model(c,pid,a.model,getattr(a,'default',False),getattr(a,'effort',None));out.update({k:v for k,v in applied.items() if k not in {'model','provider'}});out['applied']=True
+ print(json.dumps(out,indent=2,default=str))
+
+
+def aside_remove(c,a):
+ if not ASIDE_MODELS_PATH.exists():raise SystemExit(f'No Aside models.json at {ASIDE_MODELS_PATH}')
+ d=json.loads(ASIDE_MODELS_PATH.read_text());providers=d.get('providers',{})
+ if a.provider not in providers:raise SystemExit(f'Aside provider not registered: {a.provider}')
+ out={'provider':a.provider,'removed_models':len(providers[a.provider].get('models',[])),'apply':a.apply}
+ if a.apply:
+  backups=[]
+  b=ASIDE_MODELS_PATH.with_name(ASIDE_MODELS_PATH.name+f'.bak.aside-{datetime.now().strftime("%Y%m%d-%H%M%S")}');shutil.copy2(ASIDE_MODELS_PATH,b);backups.append(str(b))
+  del providers[a.provider];ASIDE_MODELS_PATH.write_text(json.dumps(d,indent=2)+'\n')
+  if ASIDE_CREDENTIALS_PATH.exists():
+   cd=json.loads(ASIDE_CREDENTIALS_PATH.read_text())
+   if a.provider in cd:
+    cb=ASIDE_CREDENTIALS_PATH.with_name(ASIDE_CREDENTIALS_PATH.name+f'.bak.aside-{datetime.now().strftime("%Y%m%d-%H%M%S")}');shutil.copy2(ASIDE_CREDENTIALS_PATH,cb);backups.append(str(cb))
+    del cd[a.provider];ASIDE_CREDENTIALS_PATH.write_text(json.dumps(cd,indent=2)+'\n')
+  out['backups']=backups
+ print(json.dumps(out,indent=2))
+def _grok_config_block(c, provider, model, force=False):
+    """Generate a Grok config.toml [model.*] block for a provider/model route. Returns a dict."""
     row = c.execute("""SELECT pm.provider_id, pm.model_identifier, pm.display_name, pm.reasoning,
         pm.context_window_tokens, pm.max_output_tokens, pm.provider_metadata_json,
         p.base_url, p.api_style, p.auth_env_var
       FROM provider_models_v2 pm JOIN providers p USING(provider_id)
-      WHERE pm.provider_id=? AND pm.model_identifier=?""", (a.provider, a.model)).fetchone()
+      WHERE pm.provider_id=? AND pm.model_identifier=?""", (provider, model)).fetchone()
     if not row:
-        raise SystemExit(f'Provider/model route not found: {a.provider}/{a.model}')
+        raise SystemExit(f'Provider/model route not found: {provider}/{model}')
     meta = _decode_json(row['provider_metadata_json']) or {}
     reasoning = bool(row['reasoning'])
-    if not reasoning and not a.force:
-        print(json.dumps({'warning': f'{a.provider}/{a.model} has reasoning=NULL in the database; thinking may not be supported', 'force_with': '--force'}, indent=2))
+    if not reasoning and not force:
+        return {'warning': f'{provider}/{model} has reasoning=NULL in the database; thinking may not be supported', 'force_with': '--force'}
 
-    # Look up harness_provider_support for grok-build + this provider
     hps = c.execute("""SELECT config_schema_json, compatibility_notes FROM harness_provider_support
-        WHERE harness_id='grok-build' AND provider_id=?""", (a.provider,)).fetchone()
+        WHERE harness_id='grok-build' AND provider_id=?""", (provider,)).fetchone()
 
-    config_key = f'{a.provider}-{a.model}'.replace('/','-').replace('.','-').replace('@','')
-    display_name = row['display_name'] or a.model
+    config_key = f'{provider}-{model}'.replace('/','-').replace('.','-').replace('@','')
+    display_name = row['display_name'] or model
     ctx = row['context_window_tokens'] or 128000
     max_tok = row['max_output_tokens'] or 8192
     provider_env_key = row['auth_env_var'] or 'XAI_API_KEY'
@@ -593,14 +713,13 @@ def grok_config(c,a):
         tc = schema.get('thinking', {})
         api_backend = tc.get('api_backend', 'chat_completions')
         extra_headers = tc.get('extra_headers')
-        effort = tc.get('reasoning_efforts', ['high'])[-1]  # default to highest effort
+        route_efforts = meta.get('reasoning_efforts') or ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+        effort = tc.get('reasoning_efforts', route_efforts)[-1]  # default to highest effort
+        all_efforts = tc.get('reasoning_efforts', route_efforts)
         notes = tc.get('notes', '')
 
-        # Use the base_url from the schema if specified, otherwise derive from provider base_url
-        # If the schema specifies a base_url_template, use it; otherwise use the provider's base_url
         base_url_from_schema = tc.get('base_url')
         if base_url_from_schema:
-            # Template supports {base_url} placeholder for the provider's base URL
             base = base_url_from_schema.replace('{base_url}', row['base_url'] or '')
         else:
             base = row['base_url'] or ''
@@ -611,11 +730,11 @@ def grok_config(c,a):
             add_headers = f'\nextra_headers = {{ {headers_str} }}'
 
         config_str = '\n'.join([
-            f'# Grok CLI config for {a.provider}/{a.model} with thinking enabled',
+            f'# Grok CLI config for {provider}/{model} with thinking enabled',
             f'# Generated by aimi grok-config on {datetime.now(timezone.utc).strftime("%Y-%m-%d")}',
             f'# {notes}',
             f'[model.{config_key}]',
-            f'model = "{a.model}"',
+            f'model = "{model}"',
             f'base_url = "{base}"',
             f'name = "{display_name} (Thinking)"',
             f'description = "{display_name} via {api_backend} backend with thinking"',
@@ -625,30 +744,29 @@ def grok_config(c,a):
             f'max_completion_tokens = {max_tok}',
             f'temperature = 0.7',
             f'reasoning_effort = "{effort}"',
+            f'supports_reasoning_effort = true',
+            f'reasoning_efforts = [{", ".join(f'"{e}"' for e in all_efforts)}]',
         ]) + add_headers
 
-        result = {
-            'provider': a.provider,
-            'model': a.model,
-            'config_key': config_key,
-            'thinking_enabled': reasoning,
-            'config_toml': config_str,
-            'api_backend': api_backend,
-            'harness_support_notes': hps['compatibility_notes'],
+        return {
+            'provider': provider, 'model': model, 'config_key': config_key,
+            'thinking_enabled': reasoning, 'config_toml': config_str,
+            'api_backend': api_backend, 'harness_support_notes': hps['compatibility_notes'],
         }
     else:
-        # Fallback: basic config without explicit thinking support from harness_provider_support
         extra_lines = []
         if reasoning:
             efforts = meta.get('reasoning_efforts', ['low', 'medium', 'high'])
             highest = efforts[-1] if efforts else 'high'
             extra_lines.append(f'# This model supports reasoning (efforts: {", ".join(efforts)})')
             extra_lines.append(f'reasoning_effort = "{highest}"')
+            extra_lines.append('supports_reasoning_effort = true')
+            extra_lines.append(f'reasoning_efforts = [{", ".join(f'"{e}"' for e in efforts)}]')
 
         toml_lines = [
-            f'# Grok CLI config for {a.provider}/{a.model}',
+            f'# Grok CLI config for {provider}/{model}',
             f'[model.{config_key}]',
-            f'model = "{a.model}"',
+            f'model = "{model}"',
             f'base_url = "{row["base_url"]}"',
             f'name = "{display_name}{" (Thinking)" if reasoning else ""}"',
             f'env_key = "{provider_env_key}"',
@@ -657,24 +775,204 @@ def grok_config(c,a):
             f'temperature = 0.7',
         ]
         if extra_lines:
-            # Insert comment after the header comment, and reasoning_effort after temperature
             for line in extra_lines:
                 if line.startswith('#'):
                     toml_lines.insert(1, line)
                 else:
                     toml_lines.append(line)
 
-        config_str = '\n'.join(toml_lines)
-        result = {
-            'provider': a.provider,
-            'model': a.model,
-            'config_key': config_key,
-            'thinking_enabled': reasoning,
-            'config_toml': config_str,
+        return {
+            'provider': provider, 'model': model, 'config_key': config_key,
+            'thinking_enabled': reasoning, 'config_toml': '\n'.join(toml_lines),
             'notes': 'No harness_provider_support found for grok-build + this provider. Config may need manual adjustment.',
         }
 
-    print(json.dumps(result, indent=2, default=str))
+
+def grok_config(c, a):
+    """Generate a Grok config.toml [model.*] block with thinking enabled for a provider/model route."""
+    print(json.dumps(_grok_config_block(c, a.provider, a.model, a.force), indent=2, default=str))
+
+
+def _route_row(c, pid, mid):
+    row = c.execute("""SELECT pm.display_name, pm.reasoning, pm.context_window_tokens, pm.max_output_tokens,
+        p.display_name provider_name, p.base_url, p.api_style, p.auth_env_var
+      FROM provider_models_v2 pm JOIN providers p USING(provider_id)
+      WHERE pm.provider_id=? AND pm.model_identifier=?""", (pid, mid)).fetchone()
+    if not row:
+        raise SystemExit(f'Provider/model route not found: {pid}/{mid}')
+    return row
+
+
+def _gen_pi(c, pid, mid):
+    return {'path': '~/.pi/agent/models.json + ~/.pi/agent/settings.json',
+            'apply': f'aimi pi-register {pid} {mid} --apply  &&  aimi pi-select {pid} {mid} --apply',
+            'config': pi_provider_fragment(c, pid, mid)}
+
+
+def _gen_aside(c, pid, mid):
+    p, provider, cred, model = aside_provider_fragment(c, pid, mid)
+    return {'path': '~/.aside/u/0/models.json + ~/.aside/u/0/credentials.json',
+            'apply': f'aimi aside-register {pid} {mid} --apply  (then restart Aside)',
+            'config': {'models_json': {'providers': {p: provider}}, 'credentials_json': cred}}
+
+
+def _gen_grok(c, pid, mid):
+    return {'path': '~/.grok/config.toml',
+            'apply': f'aimi grok-config {pid} {mid}',
+            'config': _grok_config_block(c, pid, mid, force=True)}
+
+
+def _gen_claude_code(c, pid, mid):
+    row = _route_row(c, pid, mid)
+    if pid == 'cline':
+        # ClinePass is OpenAI-only -> local translation proxy + env.
+        return {
+            'path': '~/.zshrc (env) + ~/bin/claude-cline-proxy.py + ~/bin/claude-cline',
+            'apply': 'claude-cline (launcher) or plain claude once ~/.zshrc routes to the proxy',
+            'config': {
+                'ANTHROPIC_BASE_URL': 'http://127.0.0.1:8090',
+                'ANTHROPIC_AUTH_TOKEN': 'claude-cline-proxy',
+                'ANTHROPIC_MODEL': 'deepseek-v4-flash',
+                'ANTHROPIC_SMALL_FAST_MODEL': 'deepseek-v4-flash',
+                'ANTHROPIC_DEFAULT_OPUS_MODEL': 'deepseek-v4-flash',
+                'ANTHROPIC_DEFAULT_SONNET_MODEL': 'deepseek-v4-flash',
+                'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'deepseek-v4-flash',
+                'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT': '1',
+            },
+            'notes': ['Proxy maps every request to the ClinePass subscription model cline-pass/deepseek-v4-flash.',
+                      'Claude Code 2.1.226 does not have this custom model in its built-in context-window table; the disable flag suppresses that non-blocking warning.',
+                      'The bare deepseek/deepseek-v4-flash id is a free-tier daily-capped bucket (429); cline-pass/ bills the subscription.'],
+        }
+    if pid == 'deepseek':
+        return {
+            'path': '~/.zshrc (env)',
+            'apply': 'export ANTHROPIC_* then run claude',
+            'config': {
+                'ANTHROPIC_BASE_URL': 'https://api.deepseek.com/anthropic',
+                'ANTHROPIC_AUTH_TOKEN': f'${row["auth_env_var"] or "DEEPSEEK_API_KEY"}',
+                'ANTHROPIC_MODEL': mid,
+                'ANTHROPIC_DEFAULT_OPUS_MODEL': mid,
+                'ANTHROPIC_DEFAULT_SONNET_MODEL': mid,
+                'ANTHROPIC_DEFAULT_HAIKU_MODEL': mid,
+            },
+            'notes': ['DeepSeek exposes an Anthropic-compatible endpoint at /anthropic, so no proxy is needed.'],
+        }
+    return {
+        'path': '~/.zshrc (env)',
+        'apply': 'export ANTHROPIC_* then run claude',
+        'notes': [f'{pid} is OpenAI-compatible (no Anthropic endpoint). Route Claude Code through a local translation proxy; see the claude-code+cline recipe (aimi harness-fragment claude-code cline ...) for the pattern.'],
+    }
+
+
+def _gen_droid(c, pid, mid):
+    row = _route_row(c, pid, mid)
+    entry = {'id': f'custom:{pid}:{mid}', 'provider': pid, 'model': mid,
+             'baseUrl': row['base_url'],
+             'displayName': row['display_name'] or mid,
+             'maxOutputTokens': row['max_output_tokens'] or 16384}
+    if row['auth_env_var']:
+        entry['apiKey'] = f'${row["auth_env_var"]}'
+    return {'path': '~/.factory/settings.json (customModels[])',
+            'apply': 'append the entry to the customModels array',
+            'config': entry}
+
+
+def _gen_opencode(c, pid, mid):
+    row = _route_row(c, pid, mid)
+    return {'path': '~/.config/opencode/opencode.json',
+            'apply': 'add the provider block (key auth via the env var)',
+            'config': {'provider': {pid: {
+                'options': {'baseURL': row['base_url']},
+                'models': {mid: {'name': row['display_name'] or mid,
+                                 'limit': {'context': row['context_window_tokens'] or 128000,
+                                           'output': row['max_output_tokens'] or 16384}}},
+            }}},
+            'env_key': row['auth_env_var']}
+
+
+def _gen_cline(c, pid, mid):
+    row = _route_row(c, pid, mid)
+    cfg = {'providers': {pid: {'settings': {'provider': pid, 'model': mid}}}}
+    if row['auth_env_var']:
+        cfg['providers'][pid]['settings']['auth'] = {'apiKey': f'${row["auth_env_var"]}'}
+    return {'path': '~/.cline/data/settings/providers.json',
+            'apply': 'merge the provider entry (the Cline app manages auth/oauth separately)',
+            'config': cfg}
+
+
+def _gen_vibe(c, pid, mid):
+    row = _route_row(c, pid, mid)
+    return {'path': '~/.vibe/config.toml',
+            'apply': 'add a [models.*] entry',
+            'config': {'provider': pid, 'name': mid, 'alias': mid, 'thinking': bool(row['reasoning']),
+                       'base_url': row['base_url'], 'env_key': row['auth_env_var']}}
+
+
+def _gen_antigravity(c, pid, mid):
+    return {'path': '~/.gemini/antigravity-cli/settings.json',
+            'apply': 'set the model field',
+            'config': {'model': mid, 'model_provider': pid}}
+
+
+def _gen_codex(c, pid, mid):
+    row = _route_row(c, pid, mid)
+    toml = f'model = "{mid}"\n[model_providers."{pid}"]\nname = "{row["provider_name"] or pid}"\nbase_url = "{row["base_url"]}"'
+    if row['auth_env_var']:
+        toml += f'\nenv_key = "{row["auth_env_var"]}"'
+    return {'path': '~/.codex/config.toml',
+            'apply': 'merge into config.toml',
+            'config': toml}
+
+
+def _gen_zcode(c, pid, mid):
+    row = _route_row(c, pid, mid)
+    # ZCode stores custom OpenAI-compatible providers under provider.<key> with
+    # source=='custom', options.baseURL and a models map. The apiKey is embedded
+    # literally (ZCode expands no env var in the field), so the apply step must
+    # substitute the current value of the auth env var.
+    return {'path': '~/.zcode/v2/config.json',
+            'apply': 'add a provider.<key> block (source=custom, kind=openai-compatible); ZCode stores the apiKey literally, so substitute the current value of the auth env var',
+            'config': {'name': row['provider_name'], 'kind': 'openai-compatible',
+                       'source': 'custom', 'enabled': True,
+                       'options': {'baseURL': row['base_url'], 'apiKey': f'${row["auth_env_var"]}'},
+                       'models': {mid: {'limit': {'context': row['context_window_tokens'] or 128000,
+                                                  'output': row['max_output_tokens'] or 16384},
+                                        'modalities': {'input': ['text'], 'output': ['text']},
+                                        'zcode': {'modified': False, 'priority': 100}}}},
+            'env_key': row['auth_env_var']}
+
+
+HARNESS_CONFIG = {
+    'pi': {'format': 'json', 'gen': _gen_pi},
+    'aside': {'format': 'json', 'gen': _gen_aside},
+    'grok-build': {'format': 'toml', 'gen': _gen_grok},
+    'claude-code': {'format': 'env', 'gen': _gen_claude_code},
+    'droid': {'format': 'json', 'gen': _gen_droid},
+    'opencode': {'format': 'json', 'gen': _gen_opencode},
+    'zcode': {'format': 'json', 'gen': _gen_zcode},
+    'cline': {'format': 'json', 'gen': _gen_cline},
+    'mistral-vibe': {'format': 'toml', 'gen': _gen_vibe},
+    'antigravity-cli': {'format': 'json', 'gen': _gen_antigravity},
+    'codex-cli': {'format': 'toml', 'gen': _gen_codex},
+}
+
+
+def harness_fragment(c, a):
+    """Generate the exact config fragment to point any harness at a provider/model route."""
+    known = c.execute('SELECT display_name FROM harnesses WHERE harness_id=?', (a.harness,)).fetchone()
+    if not known:
+        raise SystemExit(f'Unknown harness id: {a.harness}. Use `aimi harnesses` to list known ids.')
+    recipe = HARNESS_CONFIG.get(a.harness)
+    if recipe is None:
+        print(json.dumps({'harness': a.harness, 'display_name': known['display_name'], 'provider': a.provider, 'model': a.model,
+                          'notes': [f'No built-in fragment generator for {a.harness}. Configure manually; config guidance lives in harness_provider_support.']}, indent=2))
+        return
+    frag = recipe['gen'](c, a.provider, a.model)
+    out = {'harness': a.harness, 'display_name': known['display_name'], 'provider': a.provider, 'model': a.model,
+           'config_path': frag.get('path'), 'config_format': recipe.get('format'),
+           'apply_via': frag.get('apply'), 'config': frag.get('config'),
+           'notes': frag.get('notes')}
+    print(json.dumps({k: v for k, v in out.items() if v is not None}, indent=2, default=str))
 
 
 COMMAND_MANIFEST=[]
@@ -723,6 +1021,10 @@ def build_parser():
  x=add('pi-select','Enable a route in Pi at a position; previews unless --apply');x.add_argument('provider');x.add_argument('model');x.add_argument('--position',type=int);x.add_argument('--default',action='store_true');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_select)
  x=add('pi-add-latest-free','Register and enable the newest free route for a provider');x.add_argument('--provider',default='openrouter');x.add_argument('--position',type=int);x.add_argument('--default',action='store_true');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_add_latest_free)
  x=add('pi-remove','Remove a route from Pi enabledModels; previews unless --apply');x.add_argument('provider');x.add_argument('model');x.add_argument('--apply',action='store_true');x.set_defaults(fn=pi_remove)
+ x=add('aside-fragment','Generate the Aside models.json/credentials.json provider fragment for one route');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=aside_fragment)
+ x=add('aside-register','Register a route as an Aside custom provider; previews unless --apply',write=True);x.add_argument('provider');x.add_argument('model');x.add_argument('--default',action='store_true',help='Also make this route Aside account 0 default');x.add_argument('--effort',choices=tuple(ASIDE_THINKING_LEVEL_MAP),help='Thinking level when --default is used');x.add_argument('--apply',action='store_true');x.set_defaults(fn=aside_register)
+ x=add('aside-remove','Remove a custom provider from Aside; previews unless --apply',write=True);x.add_argument('provider');x.add_argument('--apply',action='store_true');x.set_defaults(fn=aside_remove)
+ x=add('harness-fragment','Generate the exact config to point any harness at a provider/model route');x.add_argument('harness');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=harness_fragment)
  return p,s
 
 
@@ -739,6 +1041,7 @@ def manifest(subparsers):
 
 def main():
  global COMMAND_MANIFEST
+ load_aimi_credentials()
  p,s=build_parser()
  a=p.parse_args()
  COMMAND_MANIFEST=manifest(s)
