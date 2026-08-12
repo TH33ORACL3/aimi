@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aimi_credentials import load_aimi_credentials
+from catalogue_classification import category as classify_category
+from catalogue_classification import extract_modalities
 
 load_aimi_credentials()
 ROOT = Path(__file__).resolve().parent
@@ -35,17 +37,13 @@ def get_json(url: str, env_var: str | None = None, headers: dict[str, str] | Non
         return json.loads(raw), response.status, raw
 
 
-def category(model_id: str, name: str = "") -> str:
-    s = f"{model_id} {name}".lower()
-    if any(x in s for x in ("embed", "embedding")): return "embedding"
-    if any(x in s for x in ("image", "imagen", "flux")): return "image"
-    if any(x in s for x in ("video", "veo")): return "video"
-    if any(x in s for x in ("tts", "audio", "voxtral", "speech", "whisper")): return "audio"
-    if any(x in s for x in ("vision", "vl", "scout")): return "vision"
-    if any(x in s for x in ("code", "coder", "codestral", "devstral", "fim")): return "code"
-    if any(x in s for x in ("reason", "o1", "o3", "o4", "thinking", "magistral")): return "reasoning"
-    if any(x in s for x in ("moderation", "guard", "safety")): return "safety"
-    return "chat"
+def category(
+    model_id: str,
+    name: str = "",
+    input_modalities: list[str] | None = None,
+    output_modalities: list[str] | None = None,
+) -> str:
+    return classify_category(model_id, name, input_modalities, output_modalities)
 
 
 def pricing(provider: str, item: dict) -> tuple[str, int, str, str]:
@@ -122,7 +120,14 @@ def main() -> int:
             ctx = item.get("context_length") or item.get("max_context_length") or item.get("inputTokenLimit")
             out = item.get("outputTokenLimit") or item.get("top_provider", {}).get("max_completion_tokens")
             caps = item.get("capabilities", {})
-            cat = category(mid, display)
+            caps = caps if isinstance(caps, dict) else {}
+            input_modalities = extract_modalities(item, "input_modalities")
+            output_modalities = extract_modalities(item, "output_modalities")
+            cat = category(mid, display, input_modalities, output_modalities)
+            explicit_vision = caps.get("vision") if "vision" in caps else None
+            vision = int(bool(explicit_vision)) if explicit_vision is not None else (
+                1 if input_modalities and "image" in input_modalities and output_modalities and "text" in output_modalities else None
+            )
             status_name, free, confidence, evidence = pricing(provider, item)
             base = {
                 "openrouter": "https://openrouter.ai/api/v1",
@@ -134,14 +139,14 @@ def main() -> int:
                 "gemini": "https://generativelanguage.googleapis.com/v1beta",
             }.get(provider)
             auth = {"openrouter":"AIMI_OPENROUTER_API_KEY","opencode-zen":"OPENCODE_API_KEY","nvidia-nim":"NVIDIA_API_KEY","deepseek":"DEEPSEEK_API_KEY","mistral":"MISTRAL_API_KEY","openai":"OPENAI_API_KEY","gemini":"GEMINI_API_KEY"}.get(provider)
-            conn.execute("""INSERT INTO models(model_id,provider,free_pricing,context_window,display_name,description,last_verified_at,catagory,category,pricing_status,pricing_unit,pricing_evidence,source_endpoint,api_style,base_url,auth_env_var,max_output_tokens,supports_reasoning,supports_tools,supports_structured_output,supports_streaming,verification_confidence)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(model_id) DO UPDATE SET provider=excluded.provider, free_pricing=excluded.free_pricing, context_window=COALESCE(excluded.context_window,models.context_window), display_name=excluded.display_name, description=excluded.description, last_verified_at=excluded.last_verified_at, catagory=excluded.catagory, category=excluded.category, pricing_status=excluded.pricing_status, pricing_unit=excluded.pricing_unit, pricing_evidence=excluded.pricing_evidence, source_endpoint=excluded.source_endpoint, api_style=excluded.api_style, base_url=excluded.base_url, auth_env_var=excluded.auth_env_var, max_output_tokens=COALESCE(excluded.max_output_tokens,models.max_output_tokens), supports_reasoning=COALESCE(excluded.supports_reasoning,models.supports_reasoning), supports_tools=COALESCE(excluded.supports_tools,models.supports_tools), supports_structured_output=COALESCE(excluded.supports_structured_output,models.supports_structured_output), verification_confidence=excluded.verification_confidence""",
-                (mid, provider, free, ctx, display, item.get("description"), NOW, cat, cat, status_name, "per-token" if provider in {"openrouter","openai","mistral","deepseek"} else "provider-defined", evidence, source_url, "google-generative-ai" if provider == "gemini" else "cloudflare-ai" if provider == "cloudflare-ai" else "openai-completions", base, auth, out, int(bool(item.get("thinking") or caps.get("reasoning"))) if (item.get("thinking") is not None or "reasoning" in caps) else None, int(bool(caps.get("function_calling") or caps.get("completion_chat"))) if caps else None, 1 if caps.get("function_calling") else None, 1 if provider != "cloudflare-ai" else None, confidence))
+            conn.execute("""INSERT INTO models(model_id,provider,free_pricing,context_window,display_name,description,last_verified_at,catagory,category,pricing_status,pricing_unit,pricing_evidence,source_endpoint,api_style,base_url,auth_env_var,max_output_tokens,supports_reasoning,supports_tools,supports_structured_output,supports_streaming,verification_confidence,input_modalities,output_modalities)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(model_id) DO UPDATE SET provider=excluded.provider, free_pricing=excluded.free_pricing, context_window=COALESCE(excluded.context_window,models.context_window), display_name=excluded.display_name, description=excluded.description, last_verified_at=excluded.last_verified_at, catagory=excluded.catagory, category=excluded.category, pricing_status=excluded.pricing_status, pricing_unit=excluded.pricing_unit, pricing_evidence=excluded.pricing_evidence, source_endpoint=excluded.source_endpoint, api_style=excluded.api_style, base_url=excluded.base_url, auth_env_var=excluded.auth_env_var, max_output_tokens=COALESCE(excluded.max_output_tokens,models.max_output_tokens), supports_reasoning=COALESCE(excluded.supports_reasoning,models.supports_reasoning), supports_tools=COALESCE(excluded.supports_tools,models.supports_tools), supports_structured_output=COALESCE(excluded.supports_structured_output,models.supports_structured_output), supports_streaming=COALESCE(excluded.supports_streaming,models.supports_streaming), verification_confidence=excluded.verification_confidence, input_modalities=COALESCE(excluded.input_modalities,models.input_modalities), output_modalities=COALESCE(excluded.output_modalities,models.output_modalities)""",
+                (mid, provider, free, ctx, display, item.get("description"), NOW, cat, cat, status_name, "per-token" if provider in {"openrouter","openai","mistral","deepseek"} else "provider-defined", evidence, source_url, "google-generative-ai" if provider == "gemini" else "cloudflare-ai" if provider == "cloudflare-ai" else "openai-completions", base, auth, out, int(bool(item.get("thinking") or caps.get("reasoning"))) if (item.get("thinking") is not None or "reasoning" in caps) else None, int(bool(caps.get("function_calling") or caps.get("completion_chat"))) if caps else None, 1 if caps.get("function_calling") else None, 1 if provider != "cloudflare-ai" else None, confidence, json.dumps(input_modalities) if input_modalities is not None else None, json.dumps(output_modalities) if output_modalities is not None else None))
             rowid = conn.execute("SELECT id FROM models WHERE model_id=?", (mid,)).fetchone()[0]
             conn.execute("""INSERT INTO model_capabilities(model_id,context_window_tokens,max_input_tokens,max_output_tokens,input_modalities,output_modalities,reasoning,tools,function_calling,structured_outputs,streaming,vision,notes)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(model_id) DO UPDATE SET context_window_tokens=COALESCE(excluded.context_window_tokens,model_capabilities.context_window_tokens),max_input_tokens=COALESCE(excluded.max_input_tokens,model_capabilities.max_input_tokens),max_output_tokens=COALESCE(excluded.max_output_tokens,model_capabilities.max_output_tokens),reasoning=COALESCE(excluded.reasoning,model_capabilities.reasoning),tools=COALESCE(excluded.tools,model_capabilities.tools),function_calling=COALESCE(excluded.function_calling,model_capabilities.function_calling),vision=COALESCE(excluded.vision,model_capabilities.vision)""",
-                         (rowid, ctx, item.get("inputTokenLimit"), out, json.dumps(item.get("architecture", {}).get("input_modalities", ["text"])), json.dumps(item.get("architecture", {}).get("output_modalities", ["text"])), int(bool(item.get("thinking") or caps.get("reasoning"))) if (item.get("thinking") is not None or "reasoning" in caps) else None, int(bool(caps.get("function_calling"))) if caps else None, int(bool(caps.get("function_calling"))) if caps else None, None, 1, int(bool(caps.get("vision"))) if "vision" in caps else None, item.get("deprecation")))
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(model_id) DO UPDATE SET context_window_tokens=COALESCE(excluded.context_window_tokens,model_capabilities.context_window_tokens),max_input_tokens=COALESCE(excluded.max_input_tokens,model_capabilities.max_input_tokens),max_output_tokens=COALESCE(excluded.max_output_tokens,model_capabilities.max_output_tokens),input_modalities=COALESCE(excluded.input_modalities,model_capabilities.input_modalities),output_modalities=COALESCE(excluded.output_modalities,model_capabilities.output_modalities),reasoning=COALESCE(excluded.reasoning,model_capabilities.reasoning),tools=COALESCE(excluded.tools,model_capabilities.tools),function_calling=COALESCE(excluded.function_calling,model_capabilities.function_calling),vision=COALESCE(excluded.vision,model_capabilities.vision)""",
+                         (rowid, ctx, item.get("inputTokenLimit"), out, json.dumps(input_modalities) if input_modalities is not None else None, json.dumps(output_modalities) if output_modalities is not None else None, int(bool(item.get("thinking") or caps.get("reasoning"))) if (item.get("thinking") is not None or "reasoning" in caps) else None, int(bool(caps.get("function_calling"))) if caps else None, int(bool(caps.get("function_calling"))) if caps else None, None, 1, vision, item.get("deprecation")))
             total += 1
         conn.commit()
     conn.commit()
