@@ -1,0 +1,9 @@
+{
+  "benchmark": "terminal_bench_3",
+  "benchmark_version": "3.0",
+  "source_url": "https://z.ai/blog/glm-5.3",
+  "source_type": "official_maker",
+  "rows": [
+    {"canonical_slug": "kimi-k3", "value": 0.174, "metric": "pass@1", "config_text": "Terminal-Bench 3.0 (Z.ai comparison table)", "confidence": "corroborated", "score_date": "2026-08-14", "source_url": "https://z.ai/blog/glm-5.3", "notes": "As evaluated by Z.ai in the official GLM-5.3 comparison table; Kimi's own materials do not report Terminal-Bench 3.0."}
+  ]
+}

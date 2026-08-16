@@ -1,5 +1,51 @@
 # Learnings
 
+## [LRN-20260812-002] correction
+
+**Logged**: 2026-08-12T18:27:00+02:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+OpenCode model `created` timestamps are volatile response-time values, not deployment or release evidence.
+
+### Details
+The OpenCode Go `/models` records for `deepseek-v4-flash` and `deepseek-v4-pro` showed identical `created` timestamps. I incorrectly treated that as evidence they were re-listed together. A later poll changed both timestamps from 16:01 to 16:17 UTC, proving OpenCode generates this field per response. It cannot establish model version, deployment time, or shared upstream.
+
+### Suggested Action
+Classify OpenCode `created` as volatile and exclude it from release/version inference. Origin verification requires a provider attestation, immutable build ID, upstream metadata, or a controlled China-opt-in test.
+
+### Metadata
+- Source: error
+- Related Files: `monitor_endpoints.py`, `correct_volatile_changes.py`, `aimi.db`
+- Tags: opencode-go, provider-created, volatile-metadata, provenance
+
+---
+
+## [LRN-20260812-001] correction
+
+**Logged**: 2026-08-12T18:11:00+02:00
+**Priority**: medium
+**Status**: pending
+**Area**: tooling
+
+### Summary
+For model-release checks in the AIMI project, use AIMI only unless Aubrey explicitly asks for web research.
+
+### Details
+Aubrey asked which models were released today. The correct scope was the AIMI catalogue and endpoint monitor, not the research or search skills. AIMI distinguishes provider-created timestamps and endpoint-first-seen events from verified announcement or GA dates.
+
+### Suggested Action
+Run `aimi timeline`, `aimi changes`, and `aimi where`; clearly label endpoint detections versus actual releases. Do not invoke Antigravity or Firecrawl unless explicitly requested.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `aimi`, `.agents/skills/ai-model-index/SKILL.md`
+- Tags: aimi, model-releases, scope, research-routing
+
+---
+
 ## [LRN-20260807-001] pricing_object_is_not_a_complete_free_model_source
 
 **Logged**: 2026-08-07T01:02:22+02:00
@@ -163,5 +209,60 @@ Before recommending a Cloudflare route as usable for free, check both the provid
 - Source: error
 - Related Files: `aimi.db`, Cloudflare Workers AI route test
 - Tags: cloudflare, workers-ai, free-plan, model-eligibility
+
+---
+
+## [LRN-20260812-001] correction
+
+**Logged**: 2026-08-12T17:48:00+02:00
+**Priority**: critical
+**Status**: resolved
+**Area**: config
+
+### Summary
+Never claim a protected CCR fix is durable until its persistence baseline and scheduled repair pass are validated.
+
+### Details
+The Codex bridge fix initially passed direct and Claude Code tests, but `ai.azlabs.claude-3p-persistence` restored the old proxy five minutes later. The same job repeatedly restored runtime-normalized Desktop files and CCR migration timestamps, restarting the gateway and causing `ConnectionRefused`. Aubrey correctly reported that GPT traffic was still falling back.
+
+### Suggested Action
+For every protected CCR change: patch the live file and exact baseline, update manifest hashes, run the persistence validator at least twice, prove gateway and proxy PIDs stay unchanged, then run end-to-end model tests and verify `provider=Codex` with `route_attempt_count=1`.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `~/bin/codex-ccr-proxy.py`, `~/.claude/3p-persistence/`, `~/.claude/settings.json`
+- Tags: ccr, codex, persistence, fallback, connection-refused, validation
+
+### Resolution
+- **Resolved**: 2026-08-12T17:48:00+02:00
+- **Notes**: Stabilized persistence checks, updated the baseline, removed malformed model suffixes, and verified Luna, Terra, and Sol through Codex with one attempt each.
+
+---
+
+## [LRN-20260814-ZCODE] correction
+
+**Logged**: 2026-08-14T19:48:10+02:00
+**Priority**: critical
+**Status**: promoted
+**Area**: config
+
+### Summary
+ZCode means Z.ai Code and is a separate harness from Claude Code Router.
+
+### Details
+A request for ZCode model display names was incorrectly applied to `~/.claude-code-router/config.sqlite`. The correct ZCode source is `~/.zcode/v2/config.json`, where custom providers use provider-level `modelDisplayNames`. CCR and ZCode must never be treated as interchangeable.
+
+### Suggested Action
+Route by the exact harness name before any model-config write. For ZCode, inspect and edit only `~/.zcode/v2/config.json`; for CCR, use `~/.claude-code-router/config.sqlite`. Confirm the target path and schema before mutation.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `~/.pi/agent/AGENTS.md`, `~/.zcode/v2/config.json`, `~/.claude-code-router/config.sqlite`
+- Tags: zcode, zai-code, ccr, claude-code-router, harness-routing
+
+### Resolution
+- **Resolved**: 2026-08-14T19:50:00+02:00
+- **Promoted**: `~/.pi/agent/AGENTS.md`
+- **Notes**: Added permanent routing rules and restored CCR's original display names before editing ZCode.
 
 ---

@@ -1,0 +1,15 @@
+{
+  "benchmark": "terminal_bench_3",
+  "benchmark_version": "3.0",
+  "source_url": "https://www.frontierbench.ai/",
+  "source_type": "official_benchmark",
+  "rows": [
+    {"canonical_slug": "claude-opus-5", "value": 0.427, "metric": "pass@1", "config_text": "Terminal-Bench 3.0 official leaderboard", "confidence": "verified", "score_date": "2026-08-15", "source_url": "https://www.frontierbench.ai/", "notes": "Best verified row on the official Terminal-Bench 3.0 leaderboard (via BenchLM dossier)."},
+    {"canonical_slug": "claude-sonnet-5", "value": 0.146, "metric": "pass@1", "config_text": "Terminal-Bench 3.0 official leaderboard", "confidence": "corroborated", "score_date": "2026-08-15", "source_url": "https://www.frontierbench.ai/", "notes": "Terminal-Bench 3.0 official leaderboard."},
+    {"canonical_slug": "gpt-5.6-luna", "value": 0.143, "metric": "pass@1", "config_text": "Terminal-Bench 3.0 official leaderboard", "confidence": "corroborated", "score_date": "2026-08-15", "source_url": "https://www.frontierbench.ai/", "notes": "Terminal-Bench 3.0 official leaderboard."},
+    {"canonical_slug": "gpt-5.6-terra", "value": 0.208, "metric": "pass@1", "config_text": "Terminal-Bench 3.0 official leaderboard", "confidence": "corroborated", "score_date": "2026-08-15", "source_url": "https://www.frontierbench.ai/", "notes": "Terminal-Bench 3.0 official leaderboard."},
+    {"canonical_slug": "gpt-5.6-sol", "value": 0.346, "metric": "pass@1", "config_text": "Terminal-Bench 3.0 official leaderboard", "confidence": "corroborated", "score_date": "2026-08-15", "source_url": "https://www.frontierbench.ai/", "notes": "Terminal-Bench 3.0 official leaderboard."},
+    {"canonical_slug": "grok-4.5", "value": 0.157, "metric": "pass@1", "config_text": "Terminal-Bench 3.0 official leaderboard", "confidence": "corroborated", "score_date": "2026-08-15", "source_url": "https://www.frontierbench.ai/", "notes": "Terminal-Bench 3.0 official leaderboard."},
+    {"canonical_slug": "glm-5.2", "value": 0.046, "metric": "pass@1", "config_text": "Terminal-Bench 3.0 official leaderboard", "confidence": "corroborated", "score_date": "2026-08-15", "source_url": "https://www.frontierbench.ai/", "notes": "Terminal-Bench 3.0 official leaderboard (matches Z.ai GLM-5.3 comparison table)."}
+  ]
+}

@@ -7,7 +7,7 @@
 PRAGMA foreign_keys=ON;
 BEGIN;
 
--- tables (37)
+-- tables (40)
 CREATE TABLE IF NOT EXISTS models (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_id TEXT NOT NULL UNIQUE,
@@ -573,8 +573,61 @@ CREATE TABLE IF NOT EXISTS provider_voices (
         last_observed_at TEXT,
         retrieved_at TEXT
     );
+CREATE TABLE IF NOT EXISTS subscription_promotion_accounts (
+  subscription_promotion_account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription_product_id INTEGER NOT NULL REFERENCES subscription_products(subscription_product_id),
+  registration_email TEXT NOT NULL,
+  account_label TEXT,
+  promotion_name TEXT NOT NULL,
+  promotion_status TEXT NOT NULL CHECK(promotion_status IN ('used','not_used','unknown')),
+  confirmed_at TEXT NOT NULL,
+  confirmation_source TEXT NOT NULL,
+  confidence TEXT NOT NULL CHECK(confidence IN ('verified','corroborated','single_source','inferred','unverified','conflicting','user_confirmed')),
+  notes TEXT,
+  UNIQUE(subscription_product_id,registration_email,promotion_name)
+);
+CREATE TABLE IF NOT EXISTS personal_email_accounts (
+  personal_email_account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email_address TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  account_label TEXT,
+  provider TEXT NOT NULL DEFAULT 'gmail',
+  ownership_status TEXT NOT NULL CHECK(ownership_status IN ('confirmed','reported','unverified')),
+  confirmed_at TEXT NOT NULL,
+  confirmation_source TEXT NOT NULL,
+  confidence TEXT NOT NULL CHECK(confidence IN ('verified','corroborated','single_source','inferred','unverified','conflicting','user_confirmed')),
+  notes TEXT
+);
+CREATE TABLE IF NOT EXISTS benchmark_scores (
+  benchmark_score_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  canonical_model_id INTEGER NOT NULL REFERENCES canonical_models(canonical_model_id),
+  provider_model_id INTEGER REFERENCES provider_models_v2(provider_model_id),
+  benchmark TEXT NOT NULL DEFAULT 'deepswe',
+  benchmark_version TEXT NOT NULL DEFAULT '1.1',
+  metric TEXT NOT NULL,
+  value REAL NOT NULL CHECK(value >= 0),
+  value_unit TEXT NOT NULL DEFAULT 'ratio' CHECK(value_unit IN ('ratio','percent','elo','points','count')),
+  config_text TEXT,
+  reasoning_effort TEXT,
+  agent_harness TEXT,
+  is_best_config INTEGER NOT NULL DEFAULT 0 CHECK(is_best_config IN (0,1)),
+  source_type TEXT NOT NULL CHECK(source_type IN ('leaderboard','vendor','third_party','official_maker','official_benchmark','provider_linked')),
+  score_date TEXT,
+  n_tasks INTEGER,
+  n_attempted INTEGER,
+  n_tasks_passed_any INTEGER,
+  n_runs INTEGER,
+  ci_lo REAL,
+  ci_hi REAL,
+  confidence TEXT NOT NULL DEFAULT 'single_source' CHECK(confidence IN ('verified','corroborated','single_source','unverified')),
+  source_url TEXT,
+  evidence_source_id INTEGER REFERENCES evidence_sources(evidence_source_id),
+  evidence_capture_id INTEGER REFERENCES evidence_captures(evidence_capture_id),
+  recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+  notes TEXT,
+  UNIQUE(canonical_model_id, benchmark, benchmark_version, metric, value_unit, config_text, score_date, source_type)
+);
 
--- indexs (25)
+-- indexs (29)
 CREATE INDEX IF NOT EXISTS idx_provider ON models(provider);
 CREATE INDEX IF NOT EXISTS idx_catagory ON models(catagory);
 CREATE INDEX IF NOT EXISTS idx_model_id ON models(model_id);
@@ -604,6 +657,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_subscription_harness_access
 CREATE INDEX IF NOT EXISTS idx_endpoint_changes_detected ON endpoint_changes(detected_at DESC,endpoint_change_id DESC);
 CREATE INDEX IF NOT EXISTS idx_endpoint_changes_route ON endpoint_changes(provider_id,model_identifier,detected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_provider_model_aliases_model ON provider_model_aliases(provider_model_id);
+CREATE INDEX IF NOT EXISTS idx_subscription_promotion_accounts_product
+  ON subscription_promotion_accounts(subscription_product_id, promotion_status);
+CREATE INDEX IF NOT EXISTS idx_personal_email_accounts_provider
+  ON personal_email_accounts(provider, ownership_status);
+CREATE INDEX IF NOT EXISTS idx_benchmark_scores_model
+  ON benchmark_scores(canonical_model_id, benchmark, benchmark_version);
+CREATE INDEX IF NOT EXISTS idx_benchmark_scores_best
+  ON benchmark_scores(canonical_model_id, benchmark, benchmark_version, is_best_config);
 
 -- views (8)
 CREATE VIEW IF NOT EXISTS free_models AS

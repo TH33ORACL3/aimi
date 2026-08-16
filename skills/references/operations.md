@@ -34,7 +34,7 @@ The wrapper resolves the canonical project and keeps provider credentials out of
 | `catalogue harness-models ID` | Live configured and harness-listed models, with `record_type` and source path |
 | `catalogue harness-models ID --kind configured` | Live configured/selected models only |
 | `catalogue harness-models ID --kind available` | Live models listed by the harness's own registry/cache only |
-| `catalogue monitor` | Poll ten official endpoints, retain full sanitised per-model metadata, update normalized capabilities and aliases, and persist evidence-linked diffs |
+| `catalogue monitor` | Poll eleven official endpoints, including Cline's authenticated ClinePass catalogue, retain full sanitised per-model metadata, update normalized capabilities and aliases, and persist evidence-linked diffs |
 | `catalogue monitor-status` | Target health |
 | `catalogue changes` | Unreviewed endpoint changes by default |
 | `catalogue scan` | Refresh safe local harness observations; never copies secret values |

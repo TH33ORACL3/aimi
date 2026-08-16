@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-AIMI is an evidence-first Python catalogue for AI models, provider routes, and local harnesses. The executable `aimi` is the primary CLI. Operational boundaries live in top-level Python modules, including `monitor_endpoints.py`, `refresh_catalog.py`, `free_model_health.py`, `model_discovery_notifier.py`, `handshake.py`, and `scan_local_harnesses.py`. `schema_v2.sql` defines the SQLite schema; `tests/` contains the `unittest` suite; `skills/` contains the installable cross-agent skill. `aimi.db`, raw `evidence/`, `snapshots/`, and local harness inventories are private runtime data and must remain uncommitted.
+AIMI is an evidence-first Python catalogue for AI models, provider routes, and local harnesses. The executable `aimi` is the primary CLI. Operational boundaries live in top-level Python modules, including `monitor_endpoints.py`, `refresh_catalog.py`, `free_model_health.py`, `model_discovery_notifier.py`, `model_release_desk.py`, `handshake.py`, and `scan_local_harnesses.py`. `schema_v2.sql` defines the SQLite schema; `tests/` contains the `unittest` suite; `skills/` contains the installable cross-agent skill. `aimi.db`, raw `evidence/`, `snapshots/`, and local harness inventories are private runtime data and must remain uncommitted.
 
 ## Build, Test, and Development Commands
 

@@ -1,0 +1,12 @@
+{
+  "benchmark": "swebench_verified",
+  "benchmark_version": "2026-08",
+  "source_url": "https://benchlm.ai/benchmarks/swe-bench-verified",
+  "source_type": "leaderboard",
+  "rows": [
+    {"canonical_slug": "claude-opus-5", "value": 0.96, "metric": "pass@1", "config_text": "SWE-bench Verified (pass@1)", "confidence": "corroborated", "score_date": "2026-08-14", "source_url": "https://benchlm.ai/benchmarks/swe-bench-verified", "notes": "BenchLM SWE-bench Verified snapshot 2026-08-14; Claude Opus 5 leads at 96%."},
+    {"canonical_slug": "claude-sonnet-5", "value": 0.852, "metric": "pass@1", "config_text": "SWE-bench Verified (pass@1)", "confidence": "corroborated", "score_date": "2026-08-14", "source_url": "https://benchlm.ai/benchmarks/swe-bench-verified", "notes": ""},
+    {"canonical_slug": "deepseek-v4-pro", "value": 0.806, "metric": "pass@1", "config_text": "SWE-bench Verified (pass@1)", "confidence": "corroborated", "score_date": "2026-08-14", "source_url": "https://benchlm.ai/benchmarks/swe-bench-verified", "notes": "Listed as DeepSeek V4 Pro 0813 on the leaderboard."},
+    {"canonical_slug": "deepseek-v4-flash", "value": 0.79, "metric": "pass@1", "config_text": "SWE-bench Verified (pass@1)", "confidence": "corroborated", "score_date": "2026-08-14", "source_url": "https://benchlm.ai/benchmarks/swe-bench-verified", "notes": "Listed as DeepSeek V4 Flash 0731 on the leaderboard."}
+  ]
+}

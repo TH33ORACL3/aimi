@@ -1,0 +1,20 @@
+{
+  "source_url": "https://www.frontierbench.ai/",
+  "source_type": "official_benchmark",
+  "rows": [
+    {"canonical_slug":"claude-fable-5","benchmark":"terminal_bench_3","benchmark_version":"3.0","metric":"pass@1","value":0.341,"config_text":"Claude Code","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.frontierbench.ai/","notes":"Terminal-Bench 3.0 official leaderboard."},
+    {"canonical_slug":"grok-4.6","benchmark":"terminal_bench_3","benchmark_version":"3.0","metric":"pass@1","value":0.265,"config_text":"Grok Build","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.frontierbench.ai/","notes":"Terminal-Bench 3.0 official leaderboard."},
+    {"canonical_slug":"claude-opus-4.8","benchmark":"terminal_bench_3","benchmark_version":"3.0","metric":"pass@1","value":0.211,"config_text":"Claude Code","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.frontierbench.ai/","notes":"Terminal-Bench 3.0 official leaderboard."},
+
+    {"canonical_slug":"claude-fable-5","benchmark":"terminal_bench","benchmark_version":"2.1","metric":"pass@1","value":0.838,"config_text":"Claude Code","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.tbench.ai/leaderboard/terminal-bench/2.1","notes":"Terminal-Bench 2.1 official leaderboard."},
+    {"canonical_slug":"gpt-5.5","benchmark":"terminal_bench","benchmark_version":"2.1","metric":"pass@1","value":0.831,"config_text":"Codex","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.tbench.ai/leaderboard/terminal-bench/2.1","notes":"Terminal-Bench 2.1 official leaderboard."},
+    {"canonical_slug":"grok-4.5","benchmark":"terminal_bench","benchmark_version":"2.1","metric":"pass@1","value":0.793,"config_text":"Cursor CLI","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.tbench.ai/leaderboard/terminal-bench/2.1","notes":"Terminal-Bench 2.1 official leaderboard."},
+    {"canonical_slug":"claude-opus-4.8","benchmark":"terminal_bench","benchmark_version":"2.1","metric":"pass@1","value":0.789,"config_text":"Claude Code","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.tbench.ai/leaderboard/terminal-bench/2.1","notes":"Terminal-Bench 2.1 official leaderboard."},
+    {"canonical_slug":"muse-spark-1.1","benchmark":"terminal_bench","benchmark_version":"2.1","metric":"pass@1","value":0.762,"config_text":"mini-SWE-agent","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.tbench.ai/leaderboard/terminal-bench/2.1","notes":"Terminal-Bench 2.1 official leaderboard."},
+    {"canonical_slug":"gemini-3.1-pro-preview","benchmark":"terminal_bench","benchmark_version":"2.1","metric":"pass@1","value":0.658,"config_text":"Gemini CLI","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.tbench.ai/leaderboard/terminal-bench/2.1","notes":"Terminal-Bench 2.1 official leaderboard (Gemini 3.1 Pro)."},
+    {"canonical_slug":"glm-5.1","benchmark":"terminal_bench","benchmark_version":"2.1","metric":"pass@1","value":0.587,"config_text":"Claude Code","confidence":"verified","score_date":"2026-08-15","source_url":"https://www.tbench.ai/leaderboard/terminal-bench/2.1","notes":"Terminal-Bench 2.1 official leaderboard (Claude Code harness)."},
+
+    {"canonical_slug":"qwen3.7-max","benchmark":"terminal_bench","benchmark_version":"2.1","metric":"pass@1","value":0.745,"config_text":"best published score across harnesses","confidence":"verified","score_date":"2026-08-02","source_url":"https://qwen.ai/blog?id=qwen3.8","notes":"Qwen3.8-Max official comparison table: Terminal-Bench 2.1 for Qwen3.7-Max."},
+    {"canonical_slug":"qwen3.5-plus","benchmark":"terminal_bench","benchmark_version":"2.0","metric":"pass@1","value":0.525,"config_text":"Harbor/Terminus-2","confidence":"verified","score_date":"2026-06-01","source_url":"https://qwen.ai/blog?id=qwen3.6","notes":"Qwen3.6-Plus official comparison table: Terminal-Bench 2.0 for Qwen3.5-397B-A17B."}
+  ]
+}

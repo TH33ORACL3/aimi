@@ -38,6 +38,24 @@
       "expected": 0
     },
     {
+      "check": "benchmark_scores_have_immutable_capture",
+      "passed": true,
+      "value": 0,
+      "expected": 0
+    },
+    {
+      "check": "benchmark_scores_single_best_per_model",
+      "passed": true,
+      "value": 0,
+      "expected": 0
+    },
+    {
+      "check": "benchmark_scores_values_nonnegative",
+      "passed": true,
+      "value": 0,
+      "expected": 0
+    },
+    {
       "check": "expired_free_offers_not_active",
       "passed": true,
       "value": 0,
@@ -52,7 +70,7 @@
     {
       "check": "endpoint_changes_reviewed",
       "passed": false,
-      "value": 3049,
+      "value": 4719,
       "expected": 0
     },
     {
@@ -70,7 +88,7 @@
     {
       "check": "active_free_routes_have_health_status",
       "passed": false,
-      "value": 2,
+      "value": 1,
       "expected": 0
     },
     {
@@ -99,18 +117,20 @@
     }
   ],
   "metrics": {
-    "provider_routes": 994,
-    "canonical_models": 822,
-    "active_free_routes": 169,
-    "verified_events": 971,
-    "evidence_sources": 59,
-    "claims": 93,
-    "installed_harnesses": 11,
-    "pi_enabled_models": 30,
+    "provider_routes": 1030,
+    "canonical_models": 866,
+    "active_free_routes": 164,
+    "verified_events": 996,
+    "evidence_sources": 69,
+    "claims": 147,
+    "installed_harnesses": 12,
+    "pi_enabled_models": 17,
     "pi_snapshot_order_differs": true,
-    "free_health_green": 35,
+    "benchmark_scores": 419,
+    "deepswe_scored_models": 27,
+    "free_health_green": 41,
     "free_health_orange": 1,
-    "free_health_red": 89,
-    "free_health_daily_rows": 730
+    "free_health_red": 83,
+    "free_health_daily_rows": 855
   }
 }

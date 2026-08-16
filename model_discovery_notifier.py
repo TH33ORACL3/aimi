@@ -42,7 +42,9 @@ MONITOR = PROJECT / 'monitor_endpoints.py'
 INGEST = PROJECT / 'ingest_endpoint_candidates.py'
 STATE = Path.home() / '.hermes' / 'cron' / 'model-catalogue-discovery-notifier.json'
 LOCK = Path.home() / '.hermes' / 'cron' / 'model-catalogue-discovery-notifier.lock'
-VERSION = 'model-catalogue-discovery-notifier/2.1'
+RELEASE_QUEUE = Path.home() / '.hermes' / 'cron' / 'model-release-desk-queue.json'
+VERSION = 'model-catalogue-discovery-notifier/2.2'
+RELEASE_QUEUE_VERSION = 1
 HERMES_TARGET = os.environ.get('AIMI_TELEGRAM_TARGET', 'telegram:7104596722')
 HERMES_TIMEOUT_SECONDS = 60
 DELIVERY_ATTEMPTS = 2
@@ -152,6 +154,48 @@ def save_state(value: dict) -> None:
             json.dump(value, handle, indent=2, sort_keys=True)
             handle.write('\n')
         os.replace(temp_name, STATE)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def empty_release_queue() -> dict:
+    return {
+        'version': RELEASE_QUEUE_VERSION,
+        'pending': [],
+        'processed': [],
+        'updated_at': None,
+    }
+
+
+def load_release_queue() -> dict:
+    if not RELEASE_QUEUE.exists():
+        return empty_release_queue()
+    try:
+        value = json.loads(RELEASE_QUEUE.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f'Invalid release-desk queue at {RELEASE_QUEUE}: {safe_error(exc)}') from exc
+    if not isinstance(value, dict) or not isinstance(value.get('pending'), list):
+        raise RuntimeError(f'Invalid release-desk queue at {RELEASE_QUEUE}: expected pending list')
+    value.setdefault('version', RELEASE_QUEUE_VERSION)
+    value.setdefault('processed', [])
+    value.setdefault('updated_at', None)
+    return value
+
+
+def save_release_queue(value: dict) -> None:
+    RELEASE_QUEUE.parent.mkdir(parents=True, exist_ok=True)
+    value['version'] = RELEASE_QUEUE_VERSION
+    value['updated_at'] = now()
+    fd, temp_name = tempfile.mkstemp(prefix=f'.{RELEASE_QUEUE.name}.', dir=RELEASE_QUEUE.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write('\n')
+        os.replace(temp_name, RELEASE_QUEUE)
     finally:
         try:
             os.unlink(temp_name)
@@ -431,6 +475,57 @@ def route_value(route: sqlite3.Row, key: str, default=None):
         return route[key]
     except (AttributeError, IndexError, KeyError):
         return default
+
+
+def enqueue_release_candidates(routes: list[sqlite3.Row]) -> int:
+    """Persist new route additions for the slower editorial release desk.
+
+    Endpoint additions are candidates, not release claims. The Pi worker must
+    verify official evidence before publishing anything.
+    """
+    if not routes:
+        return 0
+    queue = load_release_queue()
+    pending = queue['pending']
+    known_ids = {
+        int(item['endpoint_change_id'])
+        for item in pending
+        if isinstance(item, dict) and item.get('endpoint_change_id') is not None
+    }
+    known_ids.update(
+        int(item['endpoint_change_id'])
+        for item in queue.get('processed', [])
+        if isinstance(item, dict) and item.get('endpoint_change_id') is not None
+    )
+    added_count = 0
+    for route in routes:
+        change_id = int(route_value(route, 'endpoint_change_id', 0))
+        if not change_id or change_id in known_ids:
+            continue
+        pending.append(
+            {
+                'endpoint_change_id': change_id,
+                'provider_id': str(route_value(route, 'provider_id', 'unknown')),
+                'provider_name': str(route_value(route, 'provider_name', 'unknown')),
+                'model_identifier': str(route_value(route, 'model_identifier', 'unknown')),
+                'model_name': str(
+                    route_value(route, 'model_name')
+                    or route_value(route, 'model_identifier', 'unknown')
+                ),
+                'detected_at': str(route_value(route, 'detected_at', now())),
+                'access_type': str(route_value(route, 'access_type', 'not classified')),
+                'endpoint_url': str(route_value(route, 'endpoint_url', 'endpoint URL unavailable')),
+                'description': str(route_value(route, 'description', '') or ''),
+                'attempts': 0,
+                'last_error': None,
+                'queued_at': now(),
+            }
+        )
+        known_ids.add(change_id)
+        added_count += 1
+    if added_count:
+        save_release_queue(queue)
+    return added_count
 
 
 def provider_label(route: sqlite3.Row) -> str:
@@ -869,6 +964,11 @@ def run_locked() -> int:
         removed = route_rows(connection, last_change_id, 'model_removed')
         configured = configured_models(connection)
         connection.close()
+    except Exception as exc:
+        return handle_hard_failure(state, last_change_id, exc)
+
+    try:
+        enqueue_release_candidates(added)
     except Exception as exc:
         return handle_hard_failure(state, last_change_id, exc)
 

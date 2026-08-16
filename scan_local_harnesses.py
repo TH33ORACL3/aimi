@@ -49,9 +49,9 @@ PROVIDER_FACTS={
  'groq':('Groq','https://api.groq.com/openai/v1/models','https://api.groq.com/openai/v1','openai-completions','GROQ_API_KEY'),
  'huggingface':('Hugging Face','https://huggingface.co/api/models','https://router.huggingface.co/v1','openai-completions','HF_TOKEN'),
  'bedrock':('Amazon Bedrock','https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html','https://bedrock-runtime.{region}.amazonaws.com','aws-bedrock',None),
- 'cline':('Cline','https://docs.cline.bot/getting-started/clinepass','https://api.cline.bot/api/v1','openai-completions','CLINE_API_KEY'),
+ 'cline':('Cline','https://api.cline.bot/api/v1/ai/cline/recommended-models','https://api.cline.bot/api/v1','openai-completions','CLINE_API_KEY'),
 }
-ALIASES={'opencode':'opencode-zen','nvidia':'nvidia-nim'}
+ALIASES={'opencode':'opencode-zen','nvidia':'nvidia-nim','clinepass':'cline'}
 
 HARNESS_KNOWN={
  'pi':('Pi CLI','CLI Agent','pi',Path.home()/'.pi/agent/settings.json',Path.home()/'.pi/agent/models.json'),
@@ -67,6 +67,7 @@ HARNESS_KNOWN={
  'claude-code':('Claude Code','CLI Agent','claude',Path.home()/'.claude',Path.home()/'.claude'),
  'obsidian-warp':('Warp / Oz','CLI Agent',None,Path.home()/'.warp/settings.toml',Path.home()/'.warp/settings.toml'),
  'grok-build':('Grok Build / Grok CLI','CLI Agent','grok',Path.home()/'.grok/config.toml',Path.home()/'.grok/config.toml'),
+ 'omp':('Oh My Pi','CLI Agent','omp',Path.home()/'.omp/agent/config.yml',Path.home()/'.omp/agent/config.yml'),
 }
 
 def version(cmd):
@@ -117,11 +118,14 @@ def add_entry(conn,inst,pid,mid,pos=None,default=False,reason=None,name=None,ctx
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id,configured_provider_name,configured_model_identifier) DO UPDATE SET provider_model_id=excluded.provider_model_id,display_name=excluded.display_name,position=excluded.position,enabled=excluded.enabled,is_default=excluded.is_default,reasoning_level=excluded.reasoning_level,last_observed_at=excluded.last_observed_at,config_metadata_json=excluded.config_metadata_json""",
       (inst,pid,pmid,pid,mid,name,pos,1,int(default),reason,str(src) if src else None,NOW,NOW,json.dumps(meta) if meta else None))
 
-def add_available(conn,inst,pid,mid,src,pos=None,name=None,meta=None):
+def add_available(conn,inst,pid,mid,src,pos=None,name=None,meta=None,register=True):
     conn.execute('''INSERT INTO harness_available_model_entries(installation_id,provider_name,model_identifier,display_name,position,source_path,first_observed_at,last_observed_at,metadata_json)
       VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id,provider_name,model_identifier,source_path) DO UPDATE SET display_name=excluded.display_name,position=excluded.position,last_observed_at=excluded.last_observed_at,metadata_json=excluded.metadata_json''',
       (inst,pid,mid,name,pos,str(src),NOW,NOW,json.dumps(meta) if meta else None))
-    provider_model(conn,pid,mid,name,metadata=meta)
+    # register=False records picker availability without creating provider_models_v2
+    # rows: used when the source (e.g. omp's model cache) mirrors provider endpoints
+    # that AIMI already tracks evidence for, so the catalogue is not flooded.
+    if register: provider_model(conn,pid,mid,name,metadata=meta)
 
 
 def slug(s): return re.sub(r'[^a-z0-9]+','-',s.lower()).strip('-')
@@ -500,6 +504,125 @@ def scan_zcode(conn):
             add_available(conn,inst,pid,mid,path,pos,p.get('name'),meta)
 
 
+OMP_PROVIDER_MAP={'nvidia':'nvidia-nim','google':'gemini','bedrock-mantle':'bedrock','llama.cpp':'llamacpp','lm-studio':'custom'}
+OMP_CCR_ROUTE_MAP={'OpenCode Go':'opencode-go','ClinePass':'cline'}
+
+def _omp_split(mid):
+    """Split an omp model id '<provider>/<model>[:<effort>]' into (aimi_provider, model, effort).
+
+    omp model ids can be three-part when routed through an extension gateway, e.g.
+    'codex-ccr/OpenCode Go/deepseek-v4-flash' (provider/route/model). The CCR gateway
+    routes are mapped to their upstream AIMI providers so `where`/`recommend` match.
+    """
+    provider,rest=mid.split('/',1)
+    effort=None
+    if ':' in rest:
+        rest,effort=rest.rsplit(':',1)
+    if provider=='codex-ccr' and '/' in rest:
+        route,model=rest.split('/',1)
+        return OMP_CCR_ROUTE_MAP.get(route,provider),model,effort
+    return OMP_PROVIDER_MAP.get(provider,provider),rest,effort
+
+def _omp_yaml_block(text,key):
+    m=re.search(r'^'+re.escape(key)+r':\s*\n((?:[ \t]+[^:\n]+:[^\n]*\n)+)',text,re.M)
+    if not m:return []
+    out=[]
+    for line in m.group(1).splitlines():
+        z=re.match(r'[ \t]+([A-Za-z0-9_-]+):\s*(.*)$',line)
+        if z and z.group(2).strip():out.append((z.group(1),z.group(2).strip()))
+    return out
+
+def _omp_inline_array(text,key):
+    """Parse 'key: ["a","b"]' (flow) or a YAML block list under key from config.yml."""
+    m=re.search(r'^'+re.escape(key)+r':\s*\[(.*?)\]',text,re.M|re.S)
+    if m:
+        try:return json.loads('['+m.group(1)+']')
+        except Exception:return []
+    m=re.search(r'^'+re.escape(key)+r':\s*\n((?:[ \t]+-[^\n]*\n?)+)',text,re.M)
+    if m:
+        out=[]
+        for line in m.group(1).splitlines():
+            z=re.match(r'[ \t]+-\s*(.+)',line)
+            if z:out.append(z.group(1).strip().strip('"').strip("'"))
+        return out
+    return []
+
+def scan_omp(conn):
+    """Oh My Pi (omp) is a separate harness from Pi CLI: it reads
+    ~/.omp/agent/config.yml (modelRoles: default/smol/slow/plan/advisor + picker
+    filters) and ~/.omp/agent/models.db (model_cache: per-provider picker lists),
+    NOT ~/.pi/agent/settings.json. Extension providers live in
+    ~/.omp/agent/extensions/*.ts (e.g. the codex-ccr CCR gateway).
+    """
+    cfg=Path.home()/'.omp/agent/config.yml'
+    inst=installation(conn,'omp','Oh My Pi','CLI Agent','omp',cfg)
+    if not cfg.exists():return
+    source(conn,cfg,'Oh My Pi config and model roles','Oh My Pi')
+    text=cfg.read_text()
+    pos=0
+    seen=set()  # (pid,model) already recorded as a role; whitelist duplicates are skipped
+    # Configured role models (durable, written back by the daemon on model switch).
+    for role,mid in _omp_yaml_block(text,'modelRoles'):
+        pid,model,effort=_omp_split(mid)
+        meta={'omp_model_id':mid,'role':role,'config_path':str(cfg)}
+        add_entry(conn,inst,pid,model,pos+1,role=='default',effort,None,src=cfg,meta=meta)
+        pos+=1; seen.add((pid,model))
+    # Picker whitelist (enabledModels) if the daemon persisted it into config.yml.
+    enabled=_omp_inline_array(text,'enabledModels')
+    disabled=_omp_inline_array(text,'disabledProviders')
+    for x in enabled:
+        pid,model,effort=_omp_split(x)
+        if (pid,model) in seen:continue
+        pos+=1
+        add_entry(conn,inst,pid,model,pos,False,effort,src=cfg,meta={'omp_model_id':x,'role':'enabledModels','config_path':str(cfg)})
+    # Available: picker lists from the model cache (provider endpoints omp mirrors).
+    cache=Path.home()/'.omp/agent/models.db'
+    if cache.exists():
+        source(conn,cache,'Oh My Pi model cache (picker lists)','Oh My Pi')
+        try:
+            con=sqlite3.connect(f'file:{cache}?mode=ro',uri=True,timeout=10)
+            rows=con.execute('SELECT provider_id,models FROM model_cache').fetchall(); con.close()
+        except Exception:
+            rows=[]
+        for provider_id,models_json in rows:
+            base=provider_id.split(':',1)[0]
+            if base in ('llama.cpp','lm-studio'):continue
+            pid=OMP_PROVIDER_MAP.get(base,base)
+            if disabled and pid in disabled:continue
+            try:models=json.loads(models_json)
+            except Exception:continue
+            for n,m in enumerate(models,1):
+                mid=m.get('id')
+                if not mid:continue
+                meta={'api':m.get('api'),'base_url':m.get('baseUrl'),'reasoning':m.get('reasoning'),
+                      'input':m.get('input'),'cost':m.get('cost'),'context':m.get('contextWindow'),
+                      'max_tokens':m.get('maxTokens'),'cache_provider_id':provider_id}
+                add_available(conn,inst,pid,mid,cache,n,m.get('name'),meta,register=False)
+    # Extension-registered providers (e.g. the codex-ccr CCR gateway) are picker
+    # entries too; recorded without creating provider_models_v2 rows.
+    ext_dir=Path.home()/'.omp/agent/extensions'
+    if ext_dir.is_dir():
+        for ep in sorted(ext_dir.glob('*.ts')):
+            try:t=ep.read_text()
+            except Exception:continue
+            for pm in re.finditer(r'registerProvider\(\s*"([^"]+)"\s*,\s*\{',t):
+                pkey=pm.group(1); seg=t[pm.end():pm.end()+600]
+                name=re.search(r'name:\s*"([^"]*)"',seg)
+                base=re.search(r'baseUrl:\s*"([^"]*)"',seg)
+                api=re.search(r'api:\s*"([^"]*)"',seg)
+                # Model lists may be a const (e.g. `models: MODELS`), so scan the
+                # whole file for `{ id: "route/model", ... }` entries.
+                for mm in re.finditer(r'\{\s*id:\s*"([^"]+)"\s*,',t):
+                    mid=mm.group(1)
+                    if '/' not in mid:continue
+                    route,model=mid.split('/',1)
+                    apid=OMP_CCR_ROUTE_MAP.get(route,route)
+                    mname=re.search(r'name:\s*"([^"]*)"',t[mm.end():mm.end()+150])
+                    meta={'omp_provider':pkey,'omp_model_id':pkey+'/'+mid,'route':route,
+                          'gateway_base_url':base.group(1) if base else None,
+                          'api':api.group(1) if api else None,'extension':str(ep)}
+                    add_available(conn,inst,apid,model,ep,None,mname.group(1) if mname else name.group(1) if name else None,meta,register=False)
+
 def scan_credentials(conn):
     mapping={'OPENAI_API_KEY':'openai','ANTHROPIC_API_KEY':'anthropic','GEMINI_API_KEY':'gemini','MISTRAL_API_KEY':'mistral','DEEPSEEK_API_KEY':'deepseek','NVIDIA_API_KEY':'nvidia-nim','AIMI_OPENROUTER_API_KEY':'openrouter','OPENCODE_API_KEY':'opencode-zen','HF_TOKEN':'huggingface','GROQ_API_KEY':'groq','XAI_API_KEY':'xai','CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS':'cloudflare-ai','CLINE_API_KEY':'cline'}
     for env,pid in mapping.items():
@@ -532,7 +655,7 @@ def main():
     for hid,(name,cat,cmd,cfg,_) in HARNESS_KNOWN.items(): installation(conn,hid,name,cat,cmd,cfg)
     # Preserve historical rows but mark them inactive unless observed again in this scan.
     conn.execute("UPDATE harness_model_entries SET enabled=0 WHERE installation_id IN (SELECT installation_id FROM harness_installations WHERE machine_id=?)",(MACHINE,))
-    scan_pi(conn); scan_droid(conn); scan_opencode(conn); scan_codex(conn); scan_cline(conn); scan_claude_code(conn); scan_aside(conn); scan_zcode(conn); scan_vibe(conn); scan_antigravity(conn); scan_grok(conn); scan_warp(conn); scan_credentials(conn); preferred_pi_order(conn)
+    scan_pi(conn); scan_droid(conn); scan_opencode(conn); scan_codex(conn); scan_cline(conn); scan_claude_code(conn); scan_aside(conn); scan_zcode(conn); scan_vibe(conn); scan_antigravity(conn); scan_grok(conn); scan_warp(conn); scan_omp(conn); scan_credentials(conn); preferred_pi_order(conn)
     conn.commit()
     print(json.dumps({'harnesses':conn.execute('SELECT COUNT(*) FROM harnesses').fetchone()[0],'installations':conn.execute('SELECT COUNT(*) FROM harness_installations').fetchone()[0],'configured_models':conn.execute('SELECT COUNT(*) FROM harness_model_entries').fetchone()[0],'rankings':conn.execute('SELECT COUNT(*) FROM user_rankings').fetchone()[0],'credential_presence_records':conn.execute('SELECT COUNT(*) FROM credential_inventory').fetchone()[0]},indent=2))
 if __name__=='__main__':main()

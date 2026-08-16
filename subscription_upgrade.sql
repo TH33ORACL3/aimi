@@ -74,6 +74,38 @@ CREATE TABLE IF NOT EXISTS harness_model_tests (
   test_command_template TEXT
 );
 
+CREATE TABLE IF NOT EXISTS subscription_promotion_accounts (
+  subscription_promotion_account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription_product_id INTEGER NOT NULL REFERENCES subscription_products(subscription_product_id),
+  registration_email TEXT NOT NULL,
+  account_label TEXT,
+  promotion_name TEXT NOT NULL,
+  promotion_status TEXT NOT NULL CHECK(promotion_status IN ('used','not_used','unknown')),
+  confirmed_at TEXT NOT NULL,
+  confirmation_source TEXT NOT NULL,
+  confidence TEXT NOT NULL CHECK(confidence IN ('verified','corroborated','single_source','inferred','unverified','conflicting','user_confirmed')),
+  notes TEXT,
+  UNIQUE(subscription_product_id,registration_email,promotion_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_subscription_promotion_accounts_product
+  ON subscription_promotion_accounts(subscription_product_id, promotion_status);
+
+CREATE TABLE IF NOT EXISTS personal_email_accounts (
+  personal_email_account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email_address TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  account_label TEXT,
+  provider TEXT NOT NULL DEFAULT 'gmail',
+  ownership_status TEXT NOT NULL CHECK(ownership_status IN ('confirmed','reported','unverified')),
+  confirmed_at TEXT NOT NULL,
+  confirmation_source TEXT NOT NULL,
+  confidence TEXT NOT NULL CHECK(confidence IN ('verified','corroborated','single_source','inferred','unverified','conflicting','user_confirmed')),
+  notes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_personal_email_accounts_provider
+  ON personal_email_accounts(provider, ownership_status);
+
 DELETE FROM subscription_model_access
 WHERE provider_model_id IS NOT NULL
   AND rowid NOT IN (SELECT MIN(rowid) FROM subscription_model_access WHERE provider_model_id IS NOT NULL GROUP BY subscription_product_id,provider_model_id,access_type);

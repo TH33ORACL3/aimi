@@ -5,7 +5,7 @@ Designed for a future scheduler. It stores credential names, never credential va
 First run establishes a baseline. Later runs emit added/removed/metadata/pricing changes.
 """
 from __future__ import annotations
-import hashlib,json,os,re,sqlite3,time,urllib.request,urllib.error
+import argparse,hashlib,json,os,re,sqlite3,time,urllib.request,urllib.error
 from datetime import datetime,timezone
 from decimal import Decimal,InvalidOperation
 from pathlib import Path
@@ -25,6 +25,36 @@ CONFIG={
  'gemini':('https://generativelanguage.googleapis.com/v1beta/models','GEMINI_API_KEY','models'),
  'cloudflare-ai':(f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CLOUDFLARE_ACCOUNT_ID','{account_id}')}/ai/models/search?per_page=200",'CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS','result'),
  'ollama-cloud':('https://ollama.com/v1/models',None,'data'),
+ 'cline':('https://api.cline.bot/api/v1/ai/cline/recommended-models','CLINE_API_KEY','clinePass'),
+}
+
+CLINE_DISPLAY_NAMES={
+ 'cline-pass/deepseek-v4-flash':'DeepSeek V4 Flash',
+ 'cline-pass/qwen3.8-max':'Qwen3.8 Max',
+ 'cline-pass/kimi-k3':'Kimi K3',
+ 'cline-pass/deepseek-v4-pro':'DeepSeek V4 Pro',
+ 'cline-pass/glm-5.2':'GLM-5.2',
+ 'cline-pass/kimi-k2.7-code':'Kimi K2.7 Code',
+ 'cline-pass/kimi-k2.6':'Kimi K2.6',
+ 'cline-pass/mimo-v2.5-pro':'MiMo-V2.5-Pro',
+ 'cline-pass/mimo-v2.5':'MiMo-V2.5',
+ 'cline-pass/minimax-m3':'MiniMax M3',
+ 'cline-pass/qwen3.7-max':'Qwen3.7 Max',
+ 'cline-pass/qwen3.7-plus':'Qwen3.7 Plus',
+}
+CLINE_CANONICAL_REFERENCES={
+ 'cline-pass/deepseek-v4-flash':'deepseek/deepseek-v4-flash',
+ 'cline-pass/qwen3.8-max':'qwen/qwen3.8-max',
+ 'cline-pass/kimi-k3':'moonshotai/kimi-k3',
+ 'cline-pass/deepseek-v4-pro':'deepseek/deepseek-v4-pro',
+ 'cline-pass/glm-5.2':'z-ai/glm-5.2',
+ 'cline-pass/kimi-k2.7-code':'moonshotai/kimi-k2.7-code',
+ 'cline-pass/kimi-k2.6':'moonshotai/kimi-k2.6',
+ 'cline-pass/mimo-v2.5-pro':'xiaomi/mimo-v2.5-pro',
+ 'cline-pass/mimo-v2.5':'xiaomi/mimo-v2.5',
+ 'cline-pass/minimax-m3':'minimax/minimax-m3',
+ 'cline-pass/qwen3.7-max':'qwen/qwen3.7-max',
+ 'cline-pass/qwen3.7-plus':'qwen/qwen3.7-plus',
 }
 
 def safe_url(pid,url):
@@ -130,6 +160,12 @@ def rows(pid,payload,key):
   max_output=numeric(first_present(x.get('max_output_tokens'),x.get('max_output'),x.get('outputTokenLimit'),top.get('max_completion_tokens')))
   input_modalities=as_list(first_present(x.get('input_modalities'),architecture.get('input_modalities'),x.get('modalities')))
   output_modalities=as_list(first_present(x.get('output_modalities'),architecture.get('output_modalities'),x.get('modalities')))
+  display_name=first_present(x.get('displayName'),x.get('display_name'))
+  if pid=='cline':
+   display_name=CLINE_DISPLAY_NAMES.get(mid,display_name)
+   description=str(x.get('description') or '')
+   if context is None and re.search(r'\b1M context window\b',description,re.I):context=1000000
+   if input_modalities is None and re.search(r'vision and video input',description,re.I):input_modalities=['text','image','video']
   methods=first_present(x.get('supportedGenerationMethods'),x.get('supported_generation_methods'),x.get('methods'))
   aliases=first_present(x.get('aliases'),x.get('alias'),x.get('model_aliases'))
   alias_values=[] if aliases is None else (aliases if isinstance(aliases,list) else [aliases])
@@ -148,7 +184,7 @@ def rows(pid,payload,key):
   view={
    'id':mid,
    'name':x.get('name'),
-   'displayName':first_present(x.get('displayName'),x.get('display_name')),
+   'displayName':display_name,
    'description':x.get('description'),
    'provider_created_at':created_at(first_present(x.get('created'),x.get('created_at'))),
    'context_length':context,
@@ -338,6 +374,87 @@ def ensure_pm(c,pid,mid,x,source_snapshot_id):
  return c.execute('SELECT provider_model_id FROM provider_models_v2 WHERE provider_id=? AND model_identifier=?',(pid,mid)).fetchone()[0]
 
 
+def record_claim(c,subject_type,subject_key,field_name,value,source_id,capture_id,quote):
+ c.execute("""INSERT OR IGNORE INTO evidence_claims(
+  subject_type,subject_key,field_name,value_json,value_type,evidence_source_id,
+  evidence_capture_id,supporting_quote,observed_at,confidence,verification_method,source_priority)
+  VALUES(?,?,?,?, 'json',?,?,?,?,'verified','authenticated_official_api',1)""",
+  (subject_type,subject_key,field_name,json.dumps(value,sort_keys=True),source_id,capture_id,quote,NOW))
+
+
+def ensure_cline_catalog_metadata(c,source_id,capture_id):
+ endpoint=CONFIG['cline'][0]
+ c.execute("""UPDATE providers SET official_models_endpoint=?,free_definition=?,notes=?,last_verified_at=?
+  WHERE provider_id='cline'""",(
+   endpoint,
+   'Not free: routes listed under the official authenticated ClinePass catalogue are subscription-included.',
+   'ClinePass OpenAI-compatible gateway. Live catalogue is the authenticated /ai/cline/recommended-models endpoint; /models returns HTTP 404.',
+   NOW))
+ c.execute("""UPDATE subscription_products SET official_models_url=?,last_verified_at=?,notes=?
+  WHERE product_slug='cline-pass'""",(
+   endpoint,NOW,
+   'ClinePass: $9.99/month flat; 2-5x usage on open coding models vs standard API rates; usage metered on 5-hour rolling / weekly / monthly windows. Model membership is verified from the official authenticated ClinePass catalogue endpoint.'))
+ endpoints=(
+  ('/ai/cline/recommended-models','GET','models_catalog','Official authenticated ClinePass catalogue.',1,'available'),
+  ('/chat/completions','POST','chat_completions','OpenAI-compatible model inference endpoint.',1,'available'),
+  ('/models','GET','models_catalog','Standard OpenAI list endpoint returned HTTP 404; use /ai/cline/recommended-models.',1,'unavailable'),
+ )
+ for path,method,kind,purpose,auth,status in endpoints:
+  c.execute("""INSERT INTO provider_api_endpoints(provider_id,path,method,endpoint_kind,purpose,auth_required,endpoint_status,first_seen_at,last_verified_at,notes)
+   VALUES('cline',?,?,?,?,?,?,?,?,?)
+   ON CONFLICT(provider_id,path,method) DO UPDATE SET endpoint_kind=excluded.endpoint_kind,purpose=excluded.purpose,
+   auth_required=excluded.auth_required,endpoint_status=excluded.endpoint_status,last_verified_at=excluded.last_verified_at,notes=excluded.notes""",
+   (path,method,kind,purpose,auth,status,NOW,NOW,purpose))
+ record_claim(c,'provider','cline','official_models_endpoint',endpoint,source_id,capture_id,
+              'Authenticated official Cline response returned the clinePass model catalogue.')
+ record_claim(c,'provider','cline','api_style','openai-completions',source_id,capture_id,
+              'Cline model identifiers from the catalogue are used with the documented OpenAI-compatible chat completions endpoint.')
+
+
+def ensure_cline_route_metadata(c,provider_model_id,model_identifier,x,source_id,capture_id,new_route):
+ reference=CLINE_CANONICAL_REFERENCES.get(model_identifier)
+ if reference:
+  row=c.execute("SELECT canonical_model_id FROM provider_models_v2 WHERE provider_id='openrouter' AND model_identifier=?",(reference,)).fetchone()
+  if row and row[0] is not None:
+   c.execute("UPDATE provider_models_v2 SET canonical_model_id=COALESCE(canonical_model_id,?) WHERE provider_model_id=?",(row[0],provider_model_id))
+ existing=c.execute("""SELECT access_offer_id FROM access_offers
+  WHERE provider_model_id=? AND offer_type='subscription_included' AND ends_at IS NULL
+  ORDER BY access_offer_id DESC LIMIT 1""",(provider_model_id,)).fetchone()
+ terms='Listed under clinePass by the official authenticated Cline catalogue; an active ClinePass subscription is required.'
+ if existing:
+  c.execute("""UPDATE access_offers SET last_observed_at=?,requires_subscription=1,terms_summary=?,
+   evidence_source_id=?,evidence_capture_id=?,confidence='verified',last_verified_at=? WHERE access_offer_id=?""",
+   (NOW,terms,source_id,capture_id,NOW,existing[0]))
+ else:
+  c.execute("""INSERT INTO access_offers(provider_model_id,offer_type,first_observed_at,last_observed_at,
+   requires_subscription,terms_summary,evidence_source_id,evidence_capture_id,confidence,last_verified_at)
+   VALUES(?,'subscription_included',?,?,1,?,?,?,'verified',?)""",
+   (provider_model_id,NOW,NOW,terms,source_id,capture_id,NOW))
+ product=c.execute("SELECT subscription_product_id FROM subscription_products WHERE product_slug='cline-pass'").fetchone()
+ if product:
+  link=c.execute("""SELECT subscription_model_access_id FROM subscription_model_access
+   WHERE subscription_product_id=? AND provider_model_id=? AND access_type='subscription_included'""",(product[0],provider_model_id)).fetchone()
+  notes='Official Cline catalogue lists this exact route under clinePass; usable through the OpenAI-compatible Cline API.'
+  if link:
+   c.execute("""UPDATE subscription_model_access SET evidence_source_id=?,evidence_capture_id=?,confidence='verified',
+    last_verified_at=?,notes=? WHERE subscription_model_access_id=?""",(source_id,capture_id,NOW,notes,link[0]))
+  else:
+   c.execute("""INSERT INTO subscription_model_access(subscription_product_id,provider_model_id,access_type,
+    evidence_source_id,evidence_capture_id,confidence,last_verified_at,notes)
+    VALUES(?,?,'subscription_included',?,?,'verified',?,?)""",(product[0],provider_model_id,source_id,capture_id,NOW,notes))
+ subject=f'cline/{model_identifier}'
+ quote=f'Official authenticated Cline catalogue listed {model_identifier} under clinePass.'
+ record_claim(c,'provider_model',subject,'endpoint_status','available',source_id,capture_id,quote)
+ record_claim(c,'provider_model',subject,'description',x.get('description'),source_id,capture_id,quote)
+ record_claim(c,'provider_model',subject,'catalog_category','clinePass',source_id,capture_id,quote)
+ record_claim(c,'access_offer',subject+':subscription_included','offer_type','subscription_included',source_id,capture_id,quote)
+ if new_route:
+  c.execute("""INSERT OR IGNORE INTO model_events(provider_model_id,event_type,event_time,time_precision,evidence_source_id,
+   evidence_capture_id,supporting_quote,confidence,details_json)
+   VALUES(?,'endpoint_first_seen',?,'second',?,?,?,'verified',?)""",
+   (provider_model_id,NOW,source_id,capture_id,quote,json.dumps({'catalog_category':'clinePass'})))
+
+
 def ensure_aliases(c,provider_model_id,x,capture_id):
  aliases=x.get('aliases') or []
  if isinstance(aliases,(str,int)):aliases=[aliases]
@@ -404,6 +521,7 @@ def poll(c,pid,url,env,key):
   c.execute("UPDATE monitoring_runs SET finished_at=?,status='failed',error_summary=? WHERE monitoring_run_id=?",(NOW,str(e)[:500],run)); c.execute("UPDATE monitoring_targets SET last_checked_at=?,consecutive_failures=consecutive_failures+1 WHERE monitoring_target_id=?",(NOW,target)); c.commit(); return {'provider':pid,'status':'failed','error':str(e)}
  snap,sha,is_new=snapshot_for(c,target,pid,raw); sid,cap,_=source_capture(c,pid,url,raw,snap,status)
  source_snapshot_id=ensure_model_source(c,pid,url,status,raw,snap,len(current))
+ if pid=='cline':ensure_cline_catalog_metadata(c,sid,cap)
  prior=c.execute("SELECT monitoring_run_id,snapshot_path,response_sha256 FROM monitoring_runs WHERE monitoring_target_id=? AND monitoring_run_id<>? AND status IN ('success','unchanged','changed') ORDER BY monitoring_run_id DESC LIMIT 1",(target,run)).fetchone()
  previous={}
  if prior and prior[1] and stored_path(prior[1]).exists():
@@ -412,8 +530,10 @@ def poll(c,pid,url,env,key):
  baseline=prior is None
  if baseline:added=[];removed=[];changed_candidates=[]
  for mid,x in current.items():
+  was_known=c.execute('SELECT 1 FROM provider_models_v2 WHERE provider_id=? AND model_identifier=?',(pid,mid)).fetchone() is not None
   pm=ensure_pm(c,pid,mid,x,source_snapshot_id)
   ensure_aliases(c,pm,x,cap)
+  if pid=='cline':ensure_cline_route_metadata(c,pm,mid,x,sid,cap,not was_known)
   upsert_endpoint_offer(c,pid,pm,x,sid,cap)
   record_endpoint_events(c,pm,x,sid,cap)
   if is_free(pid,x):
@@ -440,8 +560,14 @@ def poll(c,pid,url,env,key):
  c.execute("UPDATE monitoring_targets SET last_checked_at=?,last_success_at=?,last_changed_at=CASE WHEN ?='changed' THEN ? ELSE last_changed_at END,consecutive_failures=0 WHERE monitoring_target_id=?",(NOW,NOW,state,NOW,target)); c.commit()
  return {'provider':pid,'status':state,'models':len(current),'added':len(added),'removed':len(removed),'changed':len(changed)}
 
-def main():
+def main(argv=None):
+ parser=argparse.ArgumentParser(description=__doc__)
+ parser.add_argument('--provider',action='append',choices=sorted(CONFIG),help='Poll only this provider (repeatable). Default: all providers.')
+ args=parser.parse_args(argv)
+ selected=set(args.provider or CONFIG)
  c=sqlite3.connect(DB);c.execute('PRAGMA foreign_keys=ON');ensure_metadata_schema(c);results=[]
- for pid,(url,env,key) in CONFIG.items():results.append(poll(c,pid,url,env,key))
+ for pid,(url,env,key) in CONFIG.items():
+  if pid in selected:results.append(poll(c,pid,url,env,key))
+ c.close()
  print(json.dumps(results,indent=2)); return 1 if any(x['status']=='failed' for x in results) else 0
 if __name__=='__main__':raise SystemExit(main())

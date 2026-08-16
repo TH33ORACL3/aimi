@@ -248,7 +248,7 @@ Unknown end dates must be reported as “duration unpublished,” not “free fo
 ```
 
 - The consolidated 15-minute Hermes job is `f8ff78fe2fb2`, named `model-catalogue-discovery-notifier`.
-- It polls the same 10 official model endpoints, runs `monitor_endpoints.py`, promotes endpoint-only candidates with `ingest_endpoint_candidates.py`, and sends Telegram for newly observed `model_added` or `model_removed` routes.
+- It polls the same 11 official model endpoints, including Cline's authenticated ClinePass catalogue, runs `monitor_endpoints.py`, promotes endpoint-only candidates with `ingest_endpoint_candidates.py`, and sends Telegram for newly observed `model_added` or `model_removed` routes.
 - It uses a durable pending outbox and `hermes send --json`; the endpoint watermark advances only after a successful delivery acknowledgement. Failed sends remain pending for the next run, with the outer Hermes Telegram delivery retained as a fallback.
 - It is silent when there are no new route or failure-transition notifications. Provider failures alert only on transition/change and recovery, not every repeated poll.
 - A first-run watermark suppresses historical changes; future changes are deduplicated in `~/.hermes/cron/model-catalogue-discovery-notifier.json`.
@@ -295,3 +295,26 @@ Use this for “test all free models,” “which free models work,” or “whe
 ```
 
 The public export must omit local installations, credentials, personal rankings, model order, account identifiers and local paths. Do not publish the private DB, endpoint snapshots, raw evidence directory or session transcript.
+
+## Model-release desk → sellable product linkage (2026-08-13)
+
+The release desk now ties each verified AI-model release to the AZ Labs product we sell. This is the standing standard for a major-lab release (Google, OpenAI, Anthropic, xAI).
+
+Flow: AIMI endpoint poll → `endpoint_changes` → durable queue → `model_release_desk.py process` → Pi editorial worker.
+
+Product linkage is resolved by `sellable_products_for()` in `model_release_desk.py`, which joins `subscription_model_access` → `subscription_products` via `provider_model_id` (provider + model identifier). It returns matching active products (slug, display name, vendor). The `work_input` carries each trigger item's `sellable_products` matches, and the `release_prompt` instructs Pi to lead the news article back to the matching sellable product.
+
+When no catalogue linkage exists yet, `matches` is empty and Pi falls back to the generic editorial path.
+
+What changed:
+- `sellable_products_for()` added: provider/model → active sellable products.
+- `process_pending` resolves `sellable_products` per trigger item and adds it to `work_input`.
+- `release_prompt` documents `always_link_sellable_product` and instructs Pi to point readers at the sellable product.
+- `model_discovery_notifier.py` unchanged: it enqueues candidates; the rescue desk resolves product linkage at process time so a provider allowlist is not needed in the polling wrapper.
+
+Verify with:
+```bash
+cd "/Users/TH33_ORACL3/AZ Labs/2 - Testing/AIMI"
+python3 model_release_desk.py process --dry-run   # preview work_input incl. sellable_products
+python3 model_release_desk.py list
+```

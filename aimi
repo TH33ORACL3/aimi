@@ -90,6 +90,15 @@ def subscription(c,a):
  if not row:raise SystemExit('Subscription product not found')
  links=[dict(x) for x in c.execute("""SELECT sma.access_type,sma.harness_id,sma.harness_model_identifier,pm.provider_id,pm.model_identifier,pm.display_name,sma.quota_json,sma.client_restrictions_json,sma.confidence,sma.last_verified_at,sma.notes FROM subscription_model_access sma LEFT JOIN provider_models_v2 pm USING(provider_model_id) WHERE sma.subscription_product_id=? ORDER BY COALESCE(pm.provider_id,sma.harness_id),COALESCE(pm.model_identifier,sma.harness_model_identifier)""",(row['subscription_product_id'],))]
  out=dict(row);out['models']=links;print(json.dumps(out,indent=2,default=str))
+def promotion_accounts(c,a):
+ rows=c.execute("""SELECT sp.product_slug,spa.registration_email,spa.account_label,spa.promotion_name,spa.promotion_status,spa.confirmed_at,spa.confirmation_source,spa.confidence,spa.notes
+ FROM subscription_promotion_accounts spa JOIN subscription_products sp USING(subscription_product_id)
+ WHERE sp.product_slug=? ORDER BY spa.registration_email""",(a.product,)).fetchall()
+ rows_json(rows)
+def personal_email_accounts(c,a):
+ rows=c.execute("""SELECT email_address,account_label,provider,ownership_status,confirmed_at,confirmation_source,confidence,notes
+ FROM personal_email_accounts WHERE (? IS NULL OR provider=?) ORDER BY email_address COLLATE NOCASE""",(a.provider,a.provider)).fetchall()
+ rows_json(rows)
 def model_info(c,a):
  pat='%'+a.model+'%'
  canon=[dict(x) for x in c.execute("""SELECT canonical_model_id,canonical_slug,canonical_name,developer,family,architecture,total_parameters,active_parameters,training_tokens,weights_status,license_spdx,lifecycle_status,model_card_url,official_repository_url FROM canonical_models WHERE canonical_slug LIKE ? OR canonical_name LIKE ? OR developer LIKE ? OR family LIKE ? ORDER BY canonical_name""",(pat,pat,pat,pat))]
@@ -133,7 +142,12 @@ def maker_models(c,a):
 def warp_models(c,a):
  rows_json(c.execute("""SELECT a.position,a.provider_name,a.model_identifier,a.display_name,a.metadata_json,t.tested_at last_tested_at,t.status last_test_status,t.latency_ms,t.exact_output,t.sanitized_error FROM harness_available_model_entries a JOIN harness_installations i USING(installation_id) LEFT JOIN latest_harness_model_tests t ON t.harness_id='obsidian-warp' AND t.model_identifier=a.model_identifier WHERE i.harness_id='obsidian-warp' AND a.last_observed_at=i.last_scanned_at AND (?=0 OR json_extract(a.metadata_json,'$.custom_uuid')=1) ORDER BY a.position""",(int(a.custom),)).fetchall())
 def route(c,a):
- row=c.execute("""SELECT pm.*,p.display_name provider_name,p.api_style,p.base_url,p.auth_env_var,cm.canonical_name,cm.developer,cm.family FROM provider_models_v2 pm JOIN providers p USING(provider_id) LEFT JOIN canonical_models cm USING(canonical_model_id) WHERE pm.provider_id=? AND pm.model_identifier=?""",(a.provider,a.model)).fetchone()
+ row=c.execute("""SELECT pm.*,p.display_name provider_name,p.api_style,p.base_url,p.auth_env_var,
+  p.auth_header,p.model_id_format,p.pricing_policy,p.free_definition,p.official_models_endpoint,
+  p.last_verified_at provider_last_verified_at,cm.canonical_name,cm.developer,cm.family
+  FROM provider_models_v2 pm JOIN providers p USING(provider_id)
+  LEFT JOIN canonical_models cm USING(canonical_model_id)
+  WHERE pm.provider_id=? AND pm.model_identifier=?""",(a.provider,a.model)).fetchone()
  if not row:raise SystemExit('Provider/model route not found')
  offers=[dict(x) for x in c.execute('SELECT offer_type,starts_at,ends_at,input_price_per_million_usd,output_price_per_million_usd,quota_json,rate_limits_json,confidence,last_verified_at FROM access_offers WHERE provider_model_id=? ORDER BY last_verified_at DESC',(row['provider_model_id'],))]
  out=dict(row);out['offers']=offers;out['last_test']=_latest_test(c,row['provider_model_id'])
@@ -186,12 +200,60 @@ def monitor_status(c,_):
 def pi_order(c,_):
  path=HOME/'.pi/agent/settings.json';d=json.loads(path.read_text());default=f"{d.get('defaultProvider')}/{d.get('defaultModel')}" if d.get('defaultProvider') and d.get('defaultModel') else None
  print(json.dumps({'config_path':str(path),'default':default,'count':len(d.get('enabledModels',[])),'models':[{'position':i,'model':m,'is_default':m==default} for i,m in enumerate(d.get('enabledModels',[]),1)]},indent=2))
+def deepswe(c,a):
+    """Recorded benchmark scores. Defaults to DeepSWE; pass --benchmark for another.
+    --pi shows every Pi-enabled model and whether a score is recorded."""
+    bench=getattr(a,'benchmark','deepswe')
+    if a.pi:
+        path=HOME/'.pi/agent/settings.json'
+        enabled=[x for x in json.loads(path.read_text()).get('enabledModels',[])]
+        # enabled ids use the pi alias (opencode, nvidia); map back to provider id
+        alias_rev={alias:key for key,alias in PI_ALIAS.items()}
+        out=[]
+        for mid in enabled:
+            pid,_,m=mid.partition('/')
+            cands=[pid]+([alias_rev[pid]] if pid in alias_rev else [])
+            slug=None
+            # Prefer identifiers derived from the model string (route prefixes)
+            # because provider_models_v2.canonical_model_id can be mis-linked.
+            idcands=[m]
+            for pre in ('cline-pass/','deepseek/','opencode-go/','opencode-zen/','codex/'):
+                if m.startswith(pre): idcands.append(m[len(pre):])
+            for cand in dict.fromkeys(idcands):
+                slug=c.execute('SELECT canonical_slug FROM canonical_models WHERE canonical_slug=? LIMIT 1',(cand,)).fetchone()
+                if slug: break
+            # Otherwise try the provider join, mapping pi aliases back to provider ids.
+            if not slug:
+                for prov in cands:
+                    slug=c.execute('SELECT cm.canonical_slug FROM provider_models_v2 pm JOIN canonical_models cm USING(canonical_model_id) WHERE pm.provider_id=? AND pm.model_identifier=? LIMIT 1',(prov,m)).fetchone()
+                    if slug: break
+            rec={'model':mid}
+            score=None
+            if slug:
+                score=c.execute('SELECT ROUND(b.value*100,1),b.source_type,b.reasoning_effort,b.source_url,b.score_date,b.config_text FROM benchmark_scores b WHERE b.canonical_model_id=(SELECT canonical_model_id FROM canonical_models WHERE canonical_slug=?) AND b.benchmark=? AND b.is_best_config=1 ORDER BY b.value DESC LIMIT 1',(slug[0],bench)).fetchone()
+            if score:
+                rec['score_pct']=score[0];rec['source_type']=score[1];rec['reasoning_effort']=score[2];rec['source_url']=score[3];rec['score_date']=score[4];rec['config']=score[5]
+            else:
+                rec['score']='not recorded'
+            out.append(rec)
+        if a.unscored:
+            out=[x for x in out if x.get('score')=='not recorded']
+        print(json.dumps({'config_path':str(path),'benchmark':bench,'enabled_count':len(enabled),'models':out},indent=2,default=str))
+        return
+    rows=c.execute('SELECT cm.canonical_slug,b.value,b.value_unit,b.metric,b.benchmark_version,b.config_text,b.reasoning_effort,b.source_type,b.confidence,b.source_url,b.score_date FROM benchmark_scores b JOIN canonical_models cm USING(canonical_model_id) WHERE b.benchmark=? AND b.is_best_config=1 AND (? IS NULL OR cm.canonical_slug LIKE \'%\'||?||\'%\') ORDER BY b.value DESC',(bench,a.model,a.model)).fetchall()
+    out=[]
+    for r in rows:
+        d=dict(r)
+        v=r['value']; u=r['value_unit'] or 'ratio'
+        d['value_display']=(f"{v*100:.1f}%" if u=='ratio' else (f"{v:.1f}%" if u=='percent' else (f"{v:g}" if u in ('elo','points','count') else f"{v:g}")))
+        out.append(d)
+    rows_json(out)
 def harnesses(c,_): rows_json(c.execute('SELECT h.harness_id,h.display_name,h.category,i.installed,i.version,i.executable_path,i.config_path,i.last_scanned_at FROM harnesses h LEFT JOIN harness_installations i ON i.harness_id=h.harness_id AND i.machine_id=\'aubrey-macbook\' ORDER BY COALESCE(i.installed,0) DESC,h.display_name').fetchall())
 def harness_models(c,a):
     kinds={'all':None,'configured':'configured','available':'available'}
     kind=kinds[a.kind]
-    configured="""SELECT h.harness_id,e.position,e.configured_provider_name provider_name,e.configured_model_identifier model_identifier,e.display_name,e.is_default,e.reasoning_level,e.enabled, 'configured' record_type,e.config_source_path source_path FROM harness_model_entries e JOIN harness_installations i USING(installation_id) JOIN harnesses h USING(harness_id) WHERE h.harness_id=? AND (? OR e.enabled=1)"""
-    available="""SELECT h.harness_id,a.position,a.provider_name,a.model_identifier,a.display_name,0 is_default,NULL reasoning_level,1 enabled,'available' record_type,a.source_path source_path FROM harness_available_model_entries a JOIN harness_installations i USING(installation_id) JOIN harnesses h USING(harness_id) WHERE h.harness_id=? AND a.last_observed_at=i.last_scanned_at"""
+    configured="""SELECT h.harness_id,e.position,e.configured_provider_name provider_name,e.configured_model_identifier model_identifier,e.display_name,e.is_default,e.reasoning_level,e.enabled, 'configured' record_type,e.config_source_path source_path,e.config_metadata_json metadata_json FROM harness_model_entries e JOIN harness_installations i USING(installation_id) JOIN harnesses h USING(harness_id) WHERE h.harness_id=? AND (? OR e.enabled=1)"""
+    available="""SELECT h.harness_id,a.position,a.provider_name,a.model_identifier,a.display_name,0 is_default,NULL reasoning_level,1 enabled,'available' record_type,a.source_path source_path,a.metadata_json metadata_json FROM harness_available_model_entries a JOIN harness_installations i USING(installation_id) JOIN harnesses h USING(harness_id) WHERE h.harness_id=? AND a.last_observed_at=i.last_scanned_at"""
     parts=[];params=[]
     if kind in (None,'configured'):parts.append(configured);params.extend([a.harness,int(a.history)])
     if kind in (None,'available'):parts.append(available);params.append(a.harness)
@@ -826,22 +888,26 @@ def _gen_claude_code(c, pid, mid):
     row = _route_row(c, pid, mid)
     if pid == 'cline':
         # ClinePass is OpenAI-only -> local translation proxy + env.
+        client_model = mid.split('/', 1)[-1]
         return {
             'path': '~/.zshrc (env) + ~/bin/claude-cline-proxy.py + ~/bin/claude-cline',
-            'apply': 'claude-cline (launcher) or plain claude once ~/.zshrc routes to the proxy',
+            'apply': f'stop any existing port-8090 proxy, then run CC_PROXY_MODEL={mid!r} claude-cline',
             'config': {
+                'CC_PROXY_UPSTREAM_URL': row['base_url'].rstrip('/') + '/chat/completions',
+                'CC_PROXY_MODEL': mid,
+                'CC_PROXY_KEY_ENV': row['auth_env_var'] or 'CLINE_API_KEY',
                 'ANTHROPIC_BASE_URL': 'http://127.0.0.1:8090',
                 'ANTHROPIC_AUTH_TOKEN': 'claude-cline-proxy',
-                'ANTHROPIC_MODEL': 'deepseek-v4-flash',
-                'ANTHROPIC_SMALL_FAST_MODEL': 'deepseek-v4-flash',
-                'ANTHROPIC_DEFAULT_OPUS_MODEL': 'deepseek-v4-flash',
-                'ANTHROPIC_DEFAULT_SONNET_MODEL': 'deepseek-v4-flash',
-                'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'deepseek-v4-flash',
+                'ANTHROPIC_MODEL': client_model,
+                'ANTHROPIC_SMALL_FAST_MODEL': client_model,
+                'ANTHROPIC_DEFAULT_OPUS_MODEL': client_model,
+                'ANTHROPIC_DEFAULT_SONNET_MODEL': client_model,
+                'ANTHROPIC_DEFAULT_HAIKU_MODEL': client_model,
                 'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT': '1',
             },
-            'notes': ['Proxy maps every request to the ClinePass subscription model cline-pass/deepseek-v4-flash.',
-                      'Claude Code 2.1.226 does not have this custom model in its built-in context-window table; the disable flag suppresses that non-blocking warning.',
-                      'The bare deepseek/deepseek-v4-flash id is a free-tier daily-capped bucket (429); cline-pass/ bills the subscription.'],
+            'notes': [f'Proxy maps every request to the exact ClinePass subscription model {mid}.',
+                      'Restart the local proxy when changing CC_PROXY_MODEL; a running proxy keeps the model selected at process start.',
+                      'Use the cline-pass/ namespace to bill the subscription rather than similarly named free-tier buckets.'],
         }
     if pid == 'deepseek':
         return {
@@ -942,6 +1008,56 @@ def _gen_zcode(c, pid, mid):
             'env_key': row['auth_env_var']}
 
 
+def _gen_omp(c, pid, mid):
+    row = _route_row(c, pid, mid)
+    return {'path': '~/.omp/agent/config.yml (modelRoles + picker filters) + ~/.omp/agent/models.db (picker cache)',
+            'apply': f"read-modify-write modelRoles: omp config get modelRoles  →  update the role value  →  omp config set modelRoles '{{\"default\":\"{pid}/{mid}\", ...}}'  (whole record, JSON)",
+            'config': {'modelRoles': {'default': f'{pid}/{mid}'}},
+            'notes': ['omp is a different harness from Pi CLI: it reads ~/.omp/agent/config.yml and models.db, never ~/.pi/agent/settings.json.',
+                      'omp config set does NOT accept dotted keys (modelRoles.default) — set the whole modelRoles record as JSON, preserving the other roles.',
+                      'omp only offers models it can resolve: the id must exist in its model cache (~/.omp/agent/models.db) or an extension provider, and the provider needs credentials. Run `omp models ls` to see the picker.',
+                      'Model id format: <provider>/<model> (direct) or <provider>/<route>/<model> (extension gateways, e.g. codex-ccr/OpenCode Go/deepseek-v4-flash).',
+                      'Limit the Ctrl+P picker: omp config set enabledModels \'["provider/model"]\'  or  omp config set disabledProviders \'["provider"]\'.',
+                      'Thinking: append a suffix to the model id (e.g. deepseek/deepseek-v4-flash:max) or pass --thinking=<level>; levels: off, minimal, low, medium, high, xhigh, max, auto.',
+                      'Roles: default, smol, slow, plan, advisor. Config applies to new sessions; the daemon rewrites config.yml on live model switches.']}
+
+
+def omp_select(c, a):
+    """Set one omp model role via read-modify-write of the modelRoles record.
+
+    omp rejects dotted keys (modelRoles.smol), so the command reads the live
+    record, updates one role, writes the whole record back as JSON, and verifies.
+    Previews unless --apply. Backs up config.yml before writing.
+    """
+    _route_row(c, a.provider, a.model)  # raises if the AIMI route is unknown
+    cfg = Path.home()/'.omp/agent/config.yml'
+    if not cfg.exists():
+        raise SystemExit(f'No omp config at {cfg}')
+    def roles_now():
+        r = subprocess.run(['omp','config','get','modelRoles'], capture_output=True, text=True, timeout=15)
+        if r.returncode:
+            raise SystemExit(f'omp config get modelRoles failed: {r.stderr.strip() or r.stdout.strip()}')
+        try: return json.loads(r.stdout or '{}')
+        except Exception: return {}
+    roles = roles_now()
+    new_mid = f'{a.provider}/{a.model}'
+    old_mid = roles.get(a.role)
+    preview = {'harness':'omp','role':a.role,'current':old_mid,'proposed':new_mid,
+               'config_path':str(cfg),
+               'note':'omp must be able to resolve the model id (model cache or extension provider); run `omp models ls` to check.'}
+    if not a.apply:
+        print(json.dumps(preview, indent=2, default=str)); return
+    roles[a.role] = new_mid
+    backup = ROOT/'backups'/f'omp-config.bak-{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}.yml'
+    backup.parent.mkdir(exist_ok=True)
+    shutil.copy2(cfg, backup)
+    r = subprocess.run(['omp','config','set','modelRoles', json.dumps(roles)], capture_output=True, text=True, timeout=15)
+    if r.returncode:
+        raise SystemExit(f'omp config set modelRoles failed: {r.stderr.strip() or r.stdout.strip()}')
+    preview.update({'backup':str(backup),'verified':roles_now().get(a.role)==new_mid})
+    print(json.dumps(preview, indent=2, default=str))
+
+
 HARNESS_CONFIG = {
     'pi': {'format': 'json', 'gen': _gen_pi},
     'aside': {'format': 'json', 'gen': _gen_aside},
@@ -954,6 +1070,7 @@ HARNESS_CONFIG = {
     'mistral-vibe': {'format': 'toml', 'gen': _gen_vibe},
     'antigravity-cli': {'format': 'json', 'gen': _gen_antigravity},
     'codex-cli': {'format': 'toml', 'gen': _gen_codex},
+    'omp': {'format': 'yaml', 'gen': _gen_omp},
 }
 
 
@@ -997,6 +1114,8 @@ def build_parser():
  add('providers','Every known provider with endpoint, auth env var and pricing policy').set_defaults(fn=providers)
  x=add('subscriptions','Subscription products and personal entitlement status');x.add_argument('--mine',action='store_true',help='Only subscriptions Aubrey holds');x.set_defaults(fn=subscriptions)
  x=add('subscription','One subscription product and every route it covers');x.add_argument('product');x.set_defaults(fn=subscription)
+ x=add('promotion-accounts','OpenCode Go promotion registration emails and statuses');x.add_argument('product',default='opencode-go',nargs='?');x.set_defaults(fn=promotion_accounts)
+ x=add('personal-email-accounts','Personal Gmail and other email accounts');x.add_argument('--provider',default='gmail');x.set_defaults(fn=personal_email_accounts)
  x=add('model-info','Canonical identity, all routes and all events for a model search');x.add_argument('model');x.set_defaults(fn=model_info)
  x=add('maker-models','Every route for a model maker/developer across all providers');x.add_argument('maker');x.set_defaults(fn=maker_models)
  x=add('warp-models','Warp harness models, including custom UUID entries');x.add_argument('--custom',action='store_true');x.set_defaults(fn=warp_models)
@@ -1010,6 +1129,8 @@ def build_parser():
  x=add('monitor-runs','Every official endpoint poll, including unchanged and failed runs');x.add_argument('--provider');x.add_argument('--since');x.add_argument('--until');x.add_argument('--status',choices=['running','success','unchanged','changed','failed','rate_limited']);x.add_argument('--limit',type=int,default=100);x.set_defaults(fn=monitor_runs)
  add('monitor-status','Per-endpoint last check, last change and failure streak').set_defaults(fn=monitor_status)
  add('pi-order','Live Pi enabledModels in exact order, with positions and default').set_defaults(fn=pi_order)
+ x=add('deepswe','Recorded DeepSWE v1.1 scores (best config per model)');x.add_argument('--benchmark',default='deepswe',help='Benchmark slug (default deepswe)');x.add_argument('--model',help='Filter scored models by slug substring');x.add_argument('--pi',action='store_true',help='Show Pi-enabled models and whether a score is recorded');x.add_argument('--unscored',action='store_true',help='With --pi, only models without a recorded score');x.set_defaults(fn=deepswe)
+ x=add('benchmarks','Recorded benchmark scores for any benchmark (best config per model)');x.add_argument('--benchmark',default='deepswe',help='Benchmark slug, e.g. deepswe, swebench_verified, terminal_bench');x.add_argument('--model',help='Filter by canonical slug substring');x.add_argument('--pi',action='store_true',help='Show Pi-enabled models and whether a score is recorded');x.add_argument('--unscored',action='store_true',help='With --pi, only models without a recorded score');x.set_defaults(fn=deepswe)
  add('harnesses','Known harnesses and which are installed locally (live rescan)').set_defaults(fn=harnesses)
  x=add('harness-models','Configured and available models for one harness (live rescan)');x.add_argument('harness');x.add_argument('--history',action='store_true');x.add_argument('--kind',choices=['all','configured','available'],default='all');x.set_defaults(fn=harness_models)
  x=add('where','All provider routes, offers, harness matches and freshness for a model');x.add_argument('model');x.add_argument('--refresh-harnesses',action='store_true',help='Refresh local harness config before matching; slower');x.add_argument('--no-harnesses',action='store_true',help='Skip cached local harness matches');x.set_defaults(fn=where)
@@ -1025,6 +1146,7 @@ def build_parser():
  x=add('aside-register','Register a route as an Aside custom provider; previews unless --apply',write=True);x.add_argument('provider');x.add_argument('model');x.add_argument('--default',action='store_true',help='Also make this route Aside account 0 default');x.add_argument('--effort',choices=tuple(ASIDE_THINKING_LEVEL_MAP),help='Thinking level when --default is used');x.add_argument('--apply',action='store_true');x.set_defaults(fn=aside_register)
  x=add('aside-remove','Remove a custom provider from Aside; previews unless --apply',write=True);x.add_argument('provider');x.add_argument('--apply',action='store_true');x.set_defaults(fn=aside_remove)
  x=add('harness-fragment','Generate the exact config to point any harness at a provider/model route');x.add_argument('harness');x.add_argument('provider');x.add_argument('model');x.set_defaults(fn=harness_fragment)
+ x=add('omp-select','Set an omp model role (default/smol/slow/plan/advisor); previews unless --apply',write=True);x.add_argument('provider');x.add_argument('model');x.add_argument('--role',default='default',choices=['default','smol','slow','plan','advisor']);x.add_argument('--apply',action='store_true');x.set_defaults(fn=omp_select)
  return p,s
 
 

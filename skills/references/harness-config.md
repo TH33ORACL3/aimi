@@ -13,7 +13,7 @@ per-(harness, provider) config schema, and `harness-fragment` reads it plus the
 catalogue route data (base URL, API style, auth env var, context, max tokens).
 
 Supported harness ids: `pi`, `droid`, `opencode`, `zcode`, `codex-cli`, `mistral-vibe`,
-`antigravity-cli`, `cline`, `aside`, `claude-code`, `grok-build`.
+`antigravity-cli`, `cline`, `aside`, `claude-code`, `grok-build`, `omp`.
 
 ## Per-harness recipes
 
@@ -30,6 +30,7 @@ Supported harness ids: `pi`, `droid`, `opencode`, `zcode`, `codex-cli`, `mistral
 | **Mistral Vibe** | `~/.vibe/config.toml` | TOML | add a `[models.*]` entry; set `active_model` |
 | **Antigravity CLI** | `~/.gemini/antigravity-cli/settings.json` | JSON | set the `model` field |
 | **Codex CLI** | `~/.codex/config.toml` | TOML | set `model = "<id>"` and `[model_providers."<p>"]` with `name`, `base_url`, `env_key` |
+| **Oh My Pi (omp)** | `~/.omp/agent/config.yml` (`modelRoles` + picker filters) + `~/.omp/agent/models.db` (picker cache) | YAML | read-modify-write: `omp config get modelRoles`, update the role, then `omp config set modelRoles '<full JSON record>'`. Dotted keys are rejected. Picker: `omp config set enabledModels '["p/m"]'` / `disabledProviders '["p"]'` |
 
 ## Privacy rules (important)
 
@@ -51,6 +52,29 @@ Supported harness ids: `pi`, `droid`, `opencode`, `zcode`, `codex-cli`, `mistral
   `127.0.0.1:8090`; nothing leaves the machine except the request to the provider.
 - Claude Code env vars in `~/.zshrc` are exported normally; no key values are
   stored there (the proxy owns the ClinePass key).
+
+## OMP (Oh My Pi) specifics
+
+- **Different harness from Pi CLI.** omp reads `~/.omp/agent/config.yml` and
+  `~/.omp/agent/models.db`, never `~/.pi/agent/settings.json`. Pi's `enabledModels`
+  list does not affect omp's picker.
+- **Model id format**: `<provider>/<model>[:<effort>]`. Model ids can be three-part
+  through extension gateways, e.g. `codex-ccr/OpenCode Go/deepseek-v4-flash`
+  (provider/route/model); AIMI maps CCR routes to upstream providers
+  (`OpenCode Go` → `opencode-go`, `ClinePass` → `cline`).
+- **Roles** (`default`, `smol`, `slow`, `plan`, `advisor`) live in the `modelRoles`
+  record in `config.yml`. Change one via read-modify-write: `omp config get modelRoles`,
+  update the value, then `omp config set modelRoles '<full JSON record>'` — **dotted
+  keys like `modelRoles.smol` are rejected**. The daemon rewrites `config.yml` on
+  model switches, so scan snapshots may lag a live session.
+- **Picker control**: `omp config set enabledModels '["provider/model"]'` (whitelist)
+  or `omp config set disabledProviders '["provider"]'` (blacklist). Empty by default —
+  the picker lists every provider in `model_cache`.
+- **Thinking**: suffix the model id (`:max`, `:high`, ...) or pass `--thinking=<level>`
+  (levels: off, minimal, low, medium, high, xhigh, max, auto).
+- `omp models ls` lists the picker; the extension `codex-ccr-provider.ts`
+  (`~/.omp/agent/extensions/`) registers the CCR gateway
+  (`http://127.0.0.1:3456/v1`, key from `~/bin/ccr-client-key`).
 
 ## Claude Code specifics
 

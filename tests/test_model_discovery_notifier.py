@@ -15,10 +15,18 @@ class ModelDiscoveryNotifierTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.state_path = Path(self.temp_dir.name) / 'watcher-state.json'
+        self.release_queue_path = Path(self.temp_dir.name) / 'release-queue.json'
         self.state_patch = patch.object(notifier, 'STATE', self.state_path)
+        self.release_queue_patch = patch.object(
+            notifier,
+            'RELEASE_QUEUE',
+            self.release_queue_path,
+        )
         self.state_patch.start()
+        self.release_queue_patch.start()
 
     def tearDown(self) -> None:
+        self.release_queue_patch.stop()
         self.state_patch.stop()
         self.temp_dir.cleanup()
 
@@ -94,6 +102,31 @@ class ModelDiscoveryNotifierTests(unittest.TestCase):
         saved = json.loads(self.state_path.read_text())
         self.assertEqual(saved['last_change_id'], 15)
         self.assertIsNone(saved['pending_notification'])
+        connection.close()
+
+    def test_release_candidates_are_durable_and_deduplicated(self) -> None:
+        connection = sqlite3.connect(':memory:')
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """SELECT 15 AS endpoint_change_id,
+                      'openrouter' AS provider_id,
+                      'OpenRouter' AS provider_name,
+                      'example/new-model' AS model_identifier,
+                      'Example: New Model' AS model_name,
+                      '2026-08-12T16:00:00+00:00' AS detected_at,
+                      'paid' AS access_type,
+                      'https://example.invalid/models' AS endpoint_url,
+                      'Endpoint observation only' AS description"""
+        ).fetchone()
+
+        self.assertEqual(notifier.enqueue_release_candidates([row]), 1)
+        self.assertEqual(notifier.enqueue_release_candidates([row]), 0)
+
+        queue = json.loads(self.release_queue_path.read_text())
+        self.assertEqual(len(queue['pending']), 1)
+        self.assertEqual(queue['pending'][0]['endpoint_change_id'], 15)
+        self.assertEqual(queue['pending'][0]['model_identifier'], 'example/new-model')
+        self.assertEqual(queue['pending'][0]['attempts'], 0)
         connection.close()
 
     def test_failed_delivery_keeps_pending_and_does_not_advance_watermark(self) -> None:
