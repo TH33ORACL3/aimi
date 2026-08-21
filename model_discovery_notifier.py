@@ -4,7 +4,7 @@
 The AIMI endpoint monitor is the source of truth for polling and raw evidence.
 This wrapper runs that monitor, promotes endpoint-only candidates into the
 catalogue's route/event tables, and sends Telegram notifications for added or
-removed provider routes.
+removed provider routes and provider-confirmed free-window closures.
 
 Delivery is deliberately at-least-once. A durable pending outbox is written
 before sending and the endpoint-change watermark advances only after
@@ -43,7 +43,7 @@ INGEST = PROJECT / 'ingest_endpoint_candidates.py'
 STATE = Path.home() / '.hermes' / 'cron' / 'model-catalogue-discovery-notifier.json'
 LOCK = Path.home() / '.hermes' / 'cron' / 'model-catalogue-discovery-notifier.lock'
 RELEASE_QUEUE = Path.home() / '.hermes' / 'cron' / 'model-release-desk-queue.json'
-VERSION = 'model-catalogue-discovery-notifier/2.2'
+VERSION = 'model-catalogue-discovery-notifier/2.3'
 RELEASE_QUEUE_VERSION = 1
 HERMES_TARGET = os.environ.get('AIMI_TELEGRAM_TARGET', 'telegram:7104596722')
 HERMES_TIMEOUT_SECONDS = 60
@@ -109,10 +109,11 @@ def safe_error(value: object, limit: int = 700) -> str:
     return text[:limit]
 
 
-def initial_state(last_change_id: int) -> dict:
+def initial_state(last_change_id: int, last_free_window_event_id: int = 0) -> dict:
     return {
         'version': VERSION,
         'last_change_id': int(last_change_id),
+        'last_free_window_event_id': int(last_free_window_event_id),
         'last_poll_at': None,
         'last_monitor_exit_code': None,
         'last_provider_results': [],
@@ -138,6 +139,10 @@ def load_state() -> dict | None:
     if pending is not None and not isinstance(pending, dict):
         raise RuntimeError(f'Invalid watcher state at {STATE}: pending_notification must be an object')
     value.setdefault('provider_failures', failure_snapshot(value.get('last_provider_results', [])))
+    # Older watcher state predates free-window closure notifications. A None
+    # marker lets run_locked establish a safe baseline without replaying old
+    # closure events on the first upgraded run.
+    value.setdefault('last_free_window_event_id', None)
     value.setdefault('last_hard_error', None)
     value.setdefault('last_delivery', None)
     value.setdefault('pending_notification', None)
@@ -215,6 +220,32 @@ def max_change_id(connection: sqlite3.Connection) -> int:
     return int(
         connection.execute(
             'SELECT COALESCE(MAX(endpoint_change_id), 0) FROM endpoint_changes'
+        ).fetchone()[0]
+    )
+
+
+def max_free_window_event_id(connection: sqlite3.Connection) -> int:
+    return int(
+        connection.execute(
+            """SELECT COALESCE(MAX(model_event_id), 0)
+               FROM model_events WHERE event_type='free_window_end'"""
+        ).fetchone()[0]
+    )
+
+
+def free_window_event_id_at_or_before(
+    connection: sqlite3.Connection,
+    observed_at: str | None,
+) -> int:
+    if not observed_at:
+        return max_free_window_event_id(connection)
+    return int(
+        connection.execute(
+            """SELECT COALESCE(MAX(model_event_id), 0)
+               FROM model_events
+               WHERE event_type='free_window_end'
+                 AND datetime(event_time)<=datetime(?)""",
+            (observed_at,),
         ).fetchone()[0]
     )
 
@@ -430,6 +461,38 @@ def route_rows(
         ORDER BY ec.endpoint_change_id
         """,
         (last_change_id, change_type),
+    ).fetchall()
+
+
+def free_window_closure_rows(
+    connection: sqlite3.Connection,
+    last_event_id: int,
+) -> list[sqlite3.Row]:
+    """Return authoritative free-window closure events after the watermark."""
+    return connection.execute(
+        """SELECT
+             me.model_event_id AS free_window_event_id,
+             me.provider_model_id,
+             me.event_time AS detected_at,
+             me.supporting_quote,
+             pm.provider_id,
+             pm.model_identifier,
+             COALESCE(cm.canonical_name, pm.display_name, pm.model_identifier) AS model_name,
+             COALESCE(p.display_name, pm.provider_id) AS provider_name,
+             COALESCE(
+               (SELECT mt.url FROM monitoring_targets mt
+                WHERE mt.provider_id=pm.provider_id
+                  AND mt.target_type='models_endpoint'
+                ORDER BY mt.monitoring_target_id DESC LIMIT 1),
+               'runtime endpoint unavailable'
+             ) AS endpoint_url
+           FROM model_events me
+           JOIN provider_models_v2 pm ON pm.provider_model_id=me.provider_model_id
+           LEFT JOIN canonical_models cm ON cm.canonical_model_id=pm.canonical_model_id
+           LEFT JOIN providers p ON p.provider_id=pm.provider_id
+           WHERE me.event_type='free_window_end' AND me.model_event_id>?
+           ORDER BY me.model_event_id""",
+        (int(last_event_id),),
     ).fetchall()
 
 
@@ -690,6 +753,41 @@ def bound_message(text: str) -> str:
     return text[: MAX_MESSAGE_CHARS - 80].rstrip() + '\n\n...message truncated; inspect AIMI endpoint_changes for the full list.'
 
 
+def format_free_window_closure_notification(
+    closures: list[sqlite3.Row],
+    configured: set[tuple[str, str]],
+) -> str:
+    """Format provider-confirmed free-window withdrawals for Telegram."""
+    if not closures:
+        return ''
+    lines = [
+        f'Free model access ended ({len(closures)})',
+        '_AIMI runtime probe, local time_',
+        '',
+    ]
+    for position, route in enumerate(closures[:DETAIL_LIMIT], start=1):
+        provider = str(route_value(route, 'provider_id', 'unknown'))
+        model = str(route_value(route, 'model_identifier', 'unknown'))
+        name = str(route_value(route, 'model_name', model))
+        lines.extend(
+            [
+                f'{position}. {provider_label(route)}',
+                f'Model: {inline_code(name)}',
+                f'Route: {inline_code(f"{provider}/{model}")}',
+                f'Closed: {format_local_time(route_value(route, "detected_at"))}',
+                f'Reason: {safe_error(route_value(route, "supporting_quote", "Provider ended the free promotion."), 300)}',
+            ]
+        )
+        if impact(route, configured):
+            lines.append('Still enabled locally.')
+        lines.append('')
+    if len(closures) > DETAIL_LIMIT:
+        lines.append(f'...and {len(closures) - DETAIL_LIMIT} more closure(s).')
+        lines.append('')
+    lines.append('The route may still be available through paid or subscription access.')
+    return bound_message('\n'.join(lines))
+
+
 def format_notification(
     added: list[sqlite3.Row],
     removed: list[sqlite3.Row],
@@ -806,13 +904,22 @@ def format_hard_recovery(previous_error: str | None) -> str:
     return 'AIMI model discovery monitor recovered after a watcher failure:\n\n' f'• {safe_error(previous_error)}'
 
 
-def pending_record(body: str, up_to_change_id: int, kind: str) -> dict:
+def pending_record(
+    body: str,
+    up_to_change_id: int,
+    kind: str,
+    up_to_free_window_event_id: int | None = None,
+) -> dict:
     digest = hashlib.sha256(body.encode('utf-8')).hexdigest()[:16]
     return {
         'id': f'{kind}-{up_to_change_id}-{digest}',
         'kind': kind,
         'body': body,
         'up_to_change_id': int(up_to_change_id),
+        'up_to_free_window_event_id': (
+            int(up_to_free_window_event_id)
+            if up_to_free_window_event_id is not None else None
+        ),
         'created_at': now(),
         'attempts': 0,
         'last_attempt_at': None,
@@ -841,6 +948,11 @@ def deliver_pending(state: dict) -> dict | None:
         int(state.get('last_change_id', 0)),
         int(pending.get('up_to_change_id', state.get('last_change_id', 0))),
     )
+    if pending.get('up_to_free_window_event_id') is not None:
+        state['last_free_window_event_id'] = max(
+            int(state.get('last_free_window_event_id') or 0),
+            int(pending['up_to_free_window_event_id']),
+        )
     state['last_delivery'] = {
         'notification_id': pending.get('id'),
         'kind': pending.get('kind'),
@@ -850,9 +962,17 @@ def deliver_pending(state: dict) -> dict | None:
     return result or {}
 
 
-def queue_and_deliver(state: dict, body: str, up_to_change_id: int, kind: str) -> dict:
+def queue_and_deliver(
+    state: dict,
+    body: str,
+    up_to_change_id: int,
+    kind: str,
+    up_to_free_window_event_id: int | None = None,
+) -> dict:
     """Persist an outbox item before attempting delivery."""
-    state['pending_notification'] = pending_record(body, up_to_change_id, kind)
+    state['pending_notification'] = pending_record(
+        body, up_to_change_id, kind, up_to_free_window_event_id
+    )
     save_state(state)
     return deliver_pending(state) or {}
 
@@ -923,6 +1043,14 @@ def run_locked() -> int:
     try:
         connection = db_connection()
         before_poll_max = max_change_id(connection)
+        before_free_window_max = max_free_window_event_id(connection)
+        legacy_free_window_baseline = (
+            free_window_event_id_at_or_before(
+                connection,
+                state.get('last_poll_at') if state else None,
+            )
+            if state else before_free_window_max
+        )
         connection.close()
     except Exception as exc:
         baseline = int(state.get('last_change_id', 0)) if state else 0
@@ -933,8 +1061,14 @@ def run_locked() -> int:
     # On first startup, suppress historical endpoint changes but still alert on
     # additions created by this first poll.
     if state is None:
-        state = initial_state(before_poll_max)
+        state = initial_state(before_poll_max, before_free_window_max)
+    elif state.get('last_free_window_event_id') is None:
+        # Migrate legacy watcher state without replaying old closures, while
+        # retaining events created after the last successful watcher poll.
+        state['last_free_window_event_id'] = legacy_free_window_baseline
+        save_state(state)
     last_change_id = int(state['last_change_id'])
+    last_free_window_event_id = int(state.get('last_free_window_event_id') or 0)
     previous_failures = state.get('provider_failures') or failure_snapshot(
         state.get('last_provider_results', [])
     )
@@ -960,8 +1094,10 @@ def run_locked() -> int:
     try:
         connection = db_connection()
         current_max = max_change_id(connection)
+        current_free_window_max = max_free_window_event_id(connection)
         added = route_rows(connection, last_change_id, 'model_added')
         removed = route_rows(connection, last_change_id, 'model_removed')
+        closures = free_window_closure_rows(connection, last_free_window_event_id)
         configured = configured_models(connection)
         connection.close()
     except Exception as exc:
@@ -988,6 +1124,8 @@ def run_locked() -> int:
     message_parts: list[str] = []
     if added or removed:
         message_parts.append(format_notification(added, removed, configured))
+    if closures:
+        message_parts.append(format_free_window_closure_notification(closures, configured))
     failure_text = format_failure_transitions(new_failures, recovered_failures)
     if failure_text:
         message_parts.append(bound_message(failure_text))
@@ -997,9 +1135,20 @@ def run_locked() -> int:
 
     if message_parts:
         body = bound_message('\n\n'.join(message_parts))
-        kind = 'discovery' if added or removed else 'health-transition'
+        if added or removed:
+            kind = 'discovery'
+        elif closures:
+            kind = 'free-window-closed'
+        else:
+            kind = 'health-transition'
         try:
-            queue_and_deliver(state, body, current_max, kind)
+            queue_and_deliver(
+                state,
+                body,
+                current_max,
+                kind,
+                current_free_window_max if closures else None,
+            )
         except DeliveryError as exc:
             report_delivery_failure(exc)
             return 1
@@ -1007,6 +1156,9 @@ def run_locked() -> int:
         # No user-visible notification was needed. It is safe to advance past
         # all observed endpoint changes because there is no message to lose.
         state['last_change_id'] = max(last_change_id, current_max)
+        state['last_free_window_event_id'] = max(
+            last_free_window_event_id, current_free_window_max
+        )
         save_state(state)
 
     # Provider-level failures are represented in state and transition alerts,

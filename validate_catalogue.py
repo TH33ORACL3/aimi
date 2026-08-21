@@ -10,6 +10,7 @@ integrity=c.execute('PRAGMA integrity_check').fetchone()[0];add('sqlite_integrit
 dup=c.execute('SELECT COUNT(*) FROM (SELECT provider_id,model_identifier,COUNT(*) n FROM provider_models_v2 GROUP BY 1,2 HAVING n>1)').fetchone()[0];add('provider_model_uniqueness',dup==0,dup,0)
 missing_event_source=c.execute('SELECT COUNT(*) FROM model_events e LEFT JOIN evidence_sources s USING(evidence_source_id) WHERE s.evidence_source_id IS NULL').fetchone()[0];add('event_sources_resolve',missing_event_source==0,missing_event_source,0)
 verified_without_capture=c.execute("SELECT COUNT(*) FROM model_events WHERE confidence IN ('verified','corroborated') AND evidence_capture_id IS NULL").fetchone()[0];add('verified_events_have_immutable_capture',verified_without_capture==0,verified_without_capture,0)
+free_window_without_capture=c.execute("SELECT COUNT(*) FROM model_events WHERE event_type='free_window_end' AND evidence_capture_id IS NULL").fetchone()[0];add('free_window_end_events_have_capture',free_window_without_capture==0,free_window_without_capture,0)
 # A claim asserting confidence must be re-checkable, so it needs a saved copy of
 # its source. A claim explicitly marked unverified or inferred is not asserting
 # proof, so requiring a capture there would just push people to delete the row.

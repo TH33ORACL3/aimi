@@ -3,22 +3,31 @@
 
 Targets only the active `currently_free_provider_models` view, sends one tiny
 exact-OK prompt per route, tests concurrently, and stores bounded status/daily
-aggregates. It never probes paid, unknown, subscription-only, or expired offers.
+aggregates. An explicit OpenCode Zen free-promotion withdrawal is captured,
+recorded as a free-window end event, and removed from active free offers. It
+never probes paid, unknown, subscription-only, or expired offers.
 """
 from __future__ import annotations
-import argparse, concurrent.futures, json, os, socket, sqlite3, time
+import argparse, concurrent.futures, hashlib, json, os, re, socket, sqlite3, time
 import urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 from aimi_credentials import load_aimi_credentials
+from free_offer_reconciliation import reconcile_active_temporary_free_windows
 
 load_aimi_credentials()
 ROOT=Path(__file__).resolve().parent
 DB=ROOT/'aimi.db'
 MIGRATION=ROOT/'free_model_health.sql'
-VERSION='free-model-health/1.0'
+VERSION='free-model-health/1.1'
 PROMPT='Reply with exactly OK'
+OP_ZEN_PROMOTION_ENDED_RE = re.compile(
+    r'\bfree\s+(?:promotion|window|tier|access)\s+(?:has\s+)?'
+    r'(?:ended|expired|closed)\b|\bpromotion\s+(?:has\s+)?ended\b',
+    re.IGNORECASE,
+)
+
 
 def now():return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 def connect():
@@ -51,10 +60,122 @@ def clean_error(body,status):
  msg=' '.join(str(msg or f'HTTP {status}').split())[:300]
  return msg
 
+
+def is_opencode_zen_promotion_ended(
+    provider_id: str,
+    http_status: int | None,
+    body: bytes | str,
+    error_message: str | None = None,
+) -> bool:
+    """Recognise only OpenCode's explicit free-promotion withdrawal message."""
+    if provider_id != 'opencode-zen' or http_status not in {400, 401, 402, 403}:
+        return False
+    if isinstance(body, bytes):
+        body = body.decode('utf-8', 'replace')
+    haystack = f'{body}\n{error_message or ""}'
+    return OP_ZEN_PROMOTION_ENDED_RE.search(haystack) is not None
+
+
+def _promotion_evidence_path(result: dict) -> Path:
+    stamp = str(result['tested_at']).replace(':', '').replace('+00:00', 'Z')
+    slug = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(result['model_identifier']))
+    return ROOT / 'evidence' / 'runtime-probes' / f'opencode-zen__{slug}__{stamp}.json'
+
+
+def ensure_promotion_ended_evidence(c, result: dict) -> tuple[int, int]:
+    """Archive a sanitised runtime error and return its source/capture IDs."""
+    message = str(result.get('promotion_ended_body') or result.get('error_message') or '')[:1000]
+    payload = {
+        'provider_id': result['provider_id'],
+        'model_identifier': result['model_identifier'],
+        'http_status': result.get('http_status'),
+        'message': message,
+        'observed_at': result['tested_at'],
+    }
+    raw = json.dumps(payload, sort_keys=True, indent=2).encode('utf-8')
+    archive = _promotion_evidence_path(result)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(raw)
+    source_url = 'https://opencode.ai/zen/v1/chat/completions'
+    c.execute(
+        """INSERT INTO evidence_sources(
+             url,source_type,publisher,title,official,primary_source,retrieved_at,
+             http_status,trust_priority,verification_status,archived_path)
+           VALUES(?,?, ?, ?,1,1,?,?,1,'verified',?)
+           ON CONFLICT(url) DO UPDATE SET retrieved_at=excluded.retrieved_at,
+             http_status=excluded.http_status,verification_status='verified',
+             archived_path=excluded.archived_path""",
+        (source_url, 'api_endpoint', 'opencode-zen',
+         'OpenCode Zen runtime free-promotion status', result['tested_at'],
+         result.get('http_status'), str(archive.relative_to(ROOT))),
+    )
+    source_id = c.execute(
+        'SELECT evidence_source_id FROM evidence_sources WHERE url=?',
+        (source_url,),
+    ).fetchone()[0]
+    c.execute(
+        """INSERT OR IGNORE INTO evidence_captures(
+             evidence_source_id,retrieved_at,content_sha256,archived_path,
+             http_status,extraction_method,extractor_version,notes)
+           VALUES(?,?,?,?,?,'runtime_probe','free-model-health/1.1',?)""",
+        (source_id, result['tested_at'], hashlib.sha256(raw).hexdigest(),
+         str(archive.relative_to(ROOT)), result.get('http_status'),
+         'Sanitised provider error captured from an authenticated runtime probe.'),
+    )
+    capture_id = c.execute(
+        'SELECT evidence_capture_id FROM evidence_captures WHERE evidence_source_id=? AND content_sha256=?',
+        (source_id, hashlib.sha256(raw).hexdigest()),
+    ).fetchone()[0]
+    return int(source_id), int(capture_id)
+
+
+def close_temporary_free_windows(
+    c, provider_model_id: int, evidence_source_id: int, evidence_capture_id: int,
+    detected_at: str,
+) -> int:
+    """Close every active temporary free offer for one route."""
+    cursor = c.execute(
+        """UPDATE access_offers
+           SET ends_at=?,last_observed_at=?,last_verified_at=?,
+               evidence_source_id=?,evidence_capture_id=?
+           WHERE provider_model_id=? AND offer_type='temporary_free_window'
+             AND ends_at IS NULL""",
+        (detected_at, detected_at, detected_at, evidence_source_id,
+         evidence_capture_id, provider_model_id),
+    )
+    return int(cursor.rowcount)
+
+
+def record_free_window_end_event(c, result: dict, evidence_source_id: int, evidence_capture_id: int) -> None:
+    subject_key = f"{result['provider_id']}/{result['model_identifier']}:temporary_free_window"
+    quote = str(result.get('promotion_ended_body') or result.get('error_message') or '')[:1000]
+    c.execute(
+        """INSERT OR IGNORE INTO evidence_claims(
+             subject_type,subject_key,field_name,value_json,value_type,
+             evidence_source_id,evidence_capture_id,supporting_quote,observed_at,
+             confidence,verification_method,source_priority)
+           VALUES('access_offer',?,?,?,'json',?,?,?,?, 'verified',
+                  'authenticated_official_api',1)""",
+        (subject_key, 'ends_at', json.dumps(result['tested_at']), evidence_source_id,
+         evidence_capture_id, quote, result['tested_at']),
+    )
+    c.execute(
+        """INSERT OR IGNORE INTO model_events(
+             provider_model_id,event_type,event_time,time_precision,
+             evidence_source_id,supporting_quote,confidence,details_json,
+             evidence_capture_id)
+           VALUES(?,'free_window_end',?,'second',?,?, 'verified',?,?)""",
+        (result['provider_model_id'], result['tested_at'], evidence_source_id,
+         quote, json.dumps({'reason': 'free_promotion_ended',
+                            'http_status': result.get('http_status')}),
+         evidence_capture_id),
+    )
+
+
 def probe(target,config,timeout):
  started=time.perf_counter();tested=now();pid=target['provider_id'];mid=target['model_identifier'];env=config.get('auth_env_var');key=os.getenv(env) if env else None
  base=(config.get('base_url') or '').rstrip('/')
- result={**target,'tested_at':tested,'status':'configuration_error','latency_ms':None,'http_status':None,'error_category':None,'error_message':None}
+ result={**target,'tested_at':tested,'status':'configuration_error','latency_ms':None,'http_status':None,'error_category':None,'error_message':None,'promotion_ended':False,'promotion_ended_body':None}
  if not base:
   result.update(error_category='missing_base_url',error_message='Provider base URL is not configured');return result
  if env and not key:
@@ -72,30 +193,43 @@ def probe(target,config,timeout):
   if str(content).strip()=='OK':result['status']='ok'
   else:result.update(status='unexpected_response',error_category='unexpected_response',error_message='Final response was not exactly OK')
  except urllib.error.HTTPError as e:
-  result['http_status']=e.code;message=clean_error(e.read(),e.code)
+  result['http_status']=e.code;body=e.read();message=clean_error(body,e.code)
+  promotion_ended=is_opencode_zen_promotion_ended(pid,e.code,body,message)
   if e.code==429:status='rate_limited'
   elif e.code in (401,403):status='unauthorized'
   else:status='http_error'
-  result.update(status=status,error_category=f'http_{e.code}',error_message=message)
+  result.update(status=status,error_category='free_promotion_ended' if promotion_ended else f'http_{e.code}',error_message=message,promotion_ended=promotion_ended,promotion_ended_body=message if promotion_ended else None)
  except (TimeoutError,socket.timeout):result.update(status='timeout',error_category='timeout',error_message=f'Request exceeded {timeout}s')
  except Exception as e:result.update(status='network_error',error_category=type(e).__name__,error_message=' '.join(str(e).split())[:300])
  result['latency_ms']=round((time.perf_counter()-started)*1000);return result
 
 def record(c,results,retention_days):
- c.executescript(MIGRATION.read_text());previous={x['provider_model_id']:x['last_status'] for x in c.execute('SELECT provider_model_id,last_status FROM free_model_probe_status')}
+ reconcile_active_temporary_free_windows(c, detected_at=now())
+ c.executescript(MIGRATION.read_text())
+ previous={x['provider_model_id']:x['last_status'] for x in c.execute('SELECT provider_model_id,last_status FROM free_model_probe_status')}
  # Reconcile every stored route against the live free view, including routes omitted by a partial retry.
  c.execute("""UPDATE free_model_probe_status SET currently_free=CASE WHEN EXISTS(
  SELECT 1 FROM currently_free_provider_models f WHERE f.provider_model_id=free_model_probe_status.provider_model_id
  ) THEN 1 ELSE 0 END""")
  transitions=[]
  for r in results:
+  promotion_ended=bool(r.get('promotion_ended'))
+  closed_offers=0
+  if promotion_ended:
+   source_id,capture_id=ensure_promotion_ended_evidence(c,r)
+   closed_offers=close_temporary_free_windows(c,r['provider_model_id'],source_id,capture_id,r['tested_at'])
+   if closed_offers:
+    record_free_window_end_event(c,r,source_id,capture_id)
+  r['promotion_closed_offers']=closed_offers
   ok=r['status']=='ok';old=previous.get(r['provider_model_id'])
-  if old is not None and old!=r['status']:transitions.append({'provider':r['provider_id'],'model':r['model_identifier'],'from':old,'to':r['status']})
-  elif old is None:transitions.append({'provider':r['provider_id'],'model':r['model_identifier'],'from':None,'to':r['status']})
+  current_state='promotion_ended' if promotion_ended else r['status']
+  if old is not None and old!=current_state:transitions.append({'provider':r['provider_id'],'model':r['model_identifier'],'from':old,'to':current_state})
+  elif old is None:transitions.append({'provider':r['provider_id'],'model':r['model_identifier'],'from':None,'to':current_state})
+  currently_free=0 if promotion_ended else 1
   c.execute("""INSERT INTO free_model_probe_status(provider_model_id,provider_id,model_identifier,currently_free,last_tested_at,last_status,last_ok_at,last_failure_at,latency_ms,http_status,consecutive_failures,last_error_category,last_error_message,offer_type,offer_verified_at,runner_version,updated_at)
-  VALUES(?,?,?,1,?,?,?,?,?,?,?, ?,?,?,?,?,?)
-  ON CONFLICT(provider_model_id) DO UPDATE SET provider_id=excluded.provider_id,model_identifier=excluded.model_identifier,currently_free=1,last_tested_at=excluded.last_tested_at,last_status=excluded.last_status,last_ok_at=CASE WHEN excluded.last_status='ok' THEN excluded.last_tested_at ELSE free_model_probe_status.last_ok_at END,last_failure_at=CASE WHEN excluded.last_status='ok' THEN free_model_probe_status.last_failure_at ELSE excluded.last_tested_at END,latency_ms=excluded.latency_ms,http_status=excluded.http_status,consecutive_failures=CASE WHEN excluded.last_status='ok' THEN 0 ELSE free_model_probe_status.consecutive_failures+1 END,last_error_category=excluded.last_error_category,last_error_message=excluded.last_error_message,offer_type=excluded.offer_type,offer_verified_at=excluded.offer_verified_at,runner_version=excluded.runner_version,updated_at=excluded.updated_at""",
-  (r['provider_model_id'],r['provider_id'],r['model_identifier'],r['tested_at'],r['status'],r['tested_at'] if ok else None,None if ok else r['tested_at'],r['latency_ms'],r['http_status'],0 if ok else 1,r['error_category'],r['error_message'],r['offer_type'],r['offer_verified_at'],VERSION,r['tested_at']))
+  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(provider_model_id) DO UPDATE SET provider_id=excluded.provider_id,model_identifier=excluded.model_identifier,currently_free=excluded.currently_free,last_tested_at=excluded.last_tested_at,last_status=excluded.last_status,last_ok_at=CASE WHEN excluded.last_status='ok' THEN excluded.last_tested_at ELSE free_model_probe_status.last_ok_at END,last_failure_at=CASE WHEN excluded.last_status='ok' THEN free_model_probe_status.last_failure_at ELSE excluded.last_tested_at END,latency_ms=excluded.latency_ms,http_status=excluded.http_status,consecutive_failures=CASE WHEN excluded.last_status='ok' THEN 0 ELSE free_model_probe_status.consecutive_failures+1 END,last_error_category=excluded.last_error_category,last_error_message=excluded.last_error_message,offer_type=excluded.offer_type,offer_verified_at=excluded.offer_verified_at,runner_version=excluded.runner_version,updated_at=excluded.updated_at""",
+  (r['provider_model_id'],r['provider_id'],r['model_identifier'],currently_free,r['tested_at'],r['status'],r['tested_at'] if ok else None,None if ok else r['tested_at'],r['latency_ms'],r['http_status'],0 if ok else 1,r['error_category'],r['error_message'],r['offer_type'],r['offer_verified_at'],VERSION,r['tested_at']))
   day=r['tested_at'][:10];lat=r['latency_ms'] or 0
   c.execute("""INSERT INTO free_model_probe_daily(provider_model_id,test_date,first_tested_at,last_tested_at,attempts,ok_count,failure_count,last_status,min_latency_ms,max_latency_ms,total_latency_ms)
   VALUES(?,?,?,?,1,?,?,?,?,?,?)
@@ -105,7 +239,7 @@ def record(c,results,retention_days):
 
 def main():
  p=argparse.ArgumentParser();p.add_argument('--provider');p.add_argument('--exclude-provider');p.add_argument('--only-failures',action='store_true');p.add_argument('--workers',type=int,default=4);p.add_argument('--timeout',type=int,default=45);p.add_argument('--openrouter-start-interval',type=float,default=3.2);p.add_argument('--retention-days',type=int,default=30);p.add_argument('--output',type=Path);p.add_argument('--quiet',action='store_true');a=p.parse_args()
- c=connect();c.executescript(MIGRATION.read_text());items=targets(c,a.provider,a.only_failures,a.exclude_provider);configs=provider_config(c)
+ c=connect();reconcile_active_temporary_free_windows(c, detected_at=now());c.executescript(MIGRATION.read_text());items=targets(c,a.provider,a.only_failures,a.exclude_provider);configs=provider_config(c)
  if not items:raise SystemExit('No currently verified free routes matched; no requests sent')
  with concurrent.futures.ThreadPoolExecutor(max_workers=max(1,min(a.workers,8))) as pool:
   futures=[]

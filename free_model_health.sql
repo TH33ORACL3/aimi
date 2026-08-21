@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS free_model_probe_daily (
 
 CREATE INDEX IF NOT EXISTS idx_free_probe_status_state ON free_model_probe_status(currently_free,last_status,last_tested_at);
 CREATE INDEX IF NOT EXISTS idx_free_probe_daily_date ON free_model_probe_daily(test_date);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_temporary_free_window
+  ON access_offers(provider_model_id,offer_type)
+  WHERE offer_type='temporary_free_window' AND ends_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_model_events_free_window_end
+  ON model_events(provider_model_id,event_type,event_time DESC)
+  WHERE event_type='free_window_end';
 
 DROP VIEW IF EXISTS current_free_model_health;
 CREATE VIEW current_free_model_health AS

@@ -10,6 +10,10 @@ from datetime import datetime,timezone
 from decimal import Decimal,InvalidOperation
 from pathlib import Path
 from aimi_credentials import load_aimi_credentials
+from free_offer_reconciliation import (
+    has_free_window_end,
+    reconcile_active_temporary_free_windows,
+)
 
 load_aimi_credentials()
 ROOT=Path(__file__).resolve().parent; DB=ROOT/'aimi.db'; SNAP=ROOT/'snapshots'/'monitor'; SNAP.mkdir(parents=True,exist_ok=True)
@@ -515,6 +519,7 @@ def snapshot_for(c,target,pid,raw):
 
 
 def poll(c,pid,url,env,key):
+ reconcile_active_temporary_free_windows(c, detected_at=NOW)
  target=ensure_target(c,pid,url); c.execute("INSERT INTO monitoring_runs(monitoring_target_id,started_at,status) VALUES(?,?,'running')",(target,NOW)); run=c.execute('SELECT last_insert_rowid()').fetchone()[0]
  try:status,raw,headers=fetch(pid,url,env); payload=json.loads(raw); current=rows(pid,payload,key)
  except Exception as e:
@@ -538,8 +543,13 @@ def poll(c,pid,url,env,key):
   record_endpoint_events(c,pm,x,sid,cap)
   if is_free(pid,x):
    typ='genuine_zero_price' if pid=='openrouter' else 'temporary_free_window'; terms='Endpoint reports zero input/output price' if pid=='openrouter' else 'Official model ID ends in -free; duration unpublished'
-   existing=c.execute("SELECT access_offer_id FROM access_offers WHERE provider_model_id=? AND offer_type=? AND ends_at IS NULL",(pm,typ)).fetchone()
-   if existing:c.execute('UPDATE access_offers SET last_observed_at=?,last_verified_at=?,evidence_source_id=?,evidence_capture_id=? WHERE access_offer_id=?',(NOW,NOW,sid,cap,existing[0]))
+   # OpenCode can keep a withdrawn promotion listed in /models. An
+   # authoritative runtime free_window_end event must not be reopened by the
+   # suffix-only catalogue heuristic.
+   if pid=='opencode-zen' and has_free_window_end(c,pm):
+    continue
+   existing=c.execute("SELECT access_offer_id FROM access_offers WHERE provider_model_id=? AND offer_type=? AND ends_at IS NULL ORDER BY access_offer_id LIMIT 1",(pm,typ)).fetchone()
+   if existing:c.execute('UPDATE access_offers SET last_observed_at=?,last_verified_at=?,evidence_source_id=?,evidence_capture_id=? WHERE provider_model_id=? AND offer_type=? AND ends_at IS NULL',(NOW,NOW,sid,cap,pm,typ))
    else:c.execute("INSERT INTO access_offers(provider_model_id,offer_type,first_observed_at,last_observed_at,input_price_per_million_usd,output_price_per_million_usd,terms_summary,evidence_source_id,evidence_capture_id,confidence,last_verified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(pm,typ,NOW,NOW,'0' if pid=='openrouter' else None,'0' if pid=='openrouter' else None,terms,sid,cap,'verified' if pid=='openrouter' else 'single_source',NOW))
  for mid in removed:
   row=c.execute('SELECT provider_model_id FROM provider_models_v2 WHERE provider_id=? AND model_identifier=?',(pid,mid)).fetchone()

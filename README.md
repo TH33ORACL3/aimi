@@ -70,6 +70,7 @@ On Windows, use `py` instead of `python` if required. The Python CLI is the port
 python aimi summary
 python aimi where deepseek-v4-flash
 python aimi recommend --task coding --free
+python aimi deepseek-status
 ```
 
 The main CLI is called `aimi`. It can search routes, compare providers, inspect harness configuration, show free-model health, and manage Pi model ordering.
@@ -123,9 +124,13 @@ Run `python install.py --upgrade` on an existing checkout to apply new schema ob
 ./aimi where deepseek-v4-flash
 ./aimi where deepseek-v4-flash --refresh-harnesses
 ./aimi recommend --task coding --free
+./aimi deepseek-status
+./aimi deepseek-status --timezone Africa/Johannesburg
 ```
 
 `aimi where` returns every matching provider route, its access semantics, known limits, harness matches, freshness, and the latest test outcome when one exists.
+
+`aimi deepseek-status` reports whether the current local time is peak or off-peak for DeepSeek API pricing. It uses the machine timezone by default, accepts an IANA timezone with `--timezone`, and emits explicit AM/PM times. Set `AIMI_TIMEZONE` when the machine timezone is not the desired location. Use `--at <ISO-8601 instant>` for deterministic checks.
 
 `aimi commands` returns a machine-readable manifest of every command, its arguments, and whether it writes. Agents should read that instead of guessing the surface.
 
@@ -217,11 +222,12 @@ reference the provider's `auth_env_var` name, never the key value.
 ./aimi subscriptions
 ./aimi subscriptions --mine
 ./aimi subscription opencode-go
+./aimi provider-models opencode-go
 ./aimi warp-models
 ./aimi warp-models --custom
 ```
 
-Subscription access is tracked separately from genuinely free API access. OpenCode Go and OpenCode Zen are separate products with separate endpoints. Warp BYOK and custom inference endpoints are recorded separately from Warp-hosted inference.
+Subscription access is tracked separately from genuinely free API access. OpenCode Go and OpenCode Zen are separate products with separate endpoints. Use `./aimi provider-models <provider>` for every currently detected route from the provider endpoint, including routes not yet linked to subscription evidence. `./aimi subscription <product>` keeps explicit coverage under `models` and now also exposes detected provider routes plus an `unlinked_detected_routes` list, so endpoint discoveries cannot disappear from the normal view. Warp BYOK and custom inference endpoints are recorded separately from Warp-hosted inference.
 
 ## Evidence and pricing rules
 
@@ -254,7 +260,7 @@ Results use three states:
 - **Orange:** rate limited, so availability is inconclusive.
 - **Red:** failed, unauthorized, timed out, or returned something other than exact `OK`.
 
-The database keeps one current status per route and a bounded daily history. Free-model health runs on the weekly Hermes job below, covering every verified no-charge route including NVIDIA NIM's developer tier. The scripts can also be run manually at any time.
+The database keeps one current status per route and a bounded daily history. An explicit OpenCode Zen response that says a free promotion has ended closes the active temporary-free offer, records an immutable runtime capture plus a `free_window_end` event, and prevents the next models poll from reopening it from the `-free` suffix alone. Generic authentication errors and HTTP 429 responses do not close offers. Free-model health runs on the weekly Hermes job below, covering every verified no-charge route including NVIDIA NIM's developer tier. The scripts can also be run manually at any time.
 
 ```bash
 hyperfine --runs 1 --warmup 0 --show-output \
@@ -276,7 +282,7 @@ The consolidated Hermes discovery job is:
 model-release-discovery-desk (f8ff78fe2fb2)
 ```
 
-It runs every 15 minutes, polls all eleven endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and notifies Telegram when a route is **added or removed at any provider**. Removals that match a model still enabled in a local harness are listed first and flagged, because those are the ones that will start failing. Long provider sweeps are summarised and bounded below Telegram's message limit. Discovery cards use Telegram Markdown formatting and show route, endpoint, local first-seen time, access classification, and the available context/capability metadata. Times default to `Africa/Johannesburg` (`SAST`); set `AIMI_LOCAL_TIMEZONE` only when the notification recipient's timezone changes.
+It runs every 15 minutes, polls all eleven endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and notifies Telegram when a route is **added or removed at any provider** or when a provider-confirmed free window closes. Removals that match a model still enabled in a local harness are listed first and flagged, because those are the ones that will start failing. Free-window closure notifications use a separate watermark so a failed Telegram delivery cannot lose the event or advance past it. Long provider sweeps are summarised and bounded below Telegram's message limit. Discovery cards use Telegram Markdown formatting and show route, endpoint, local first-seen time, access classification, and the available context/capability metadata. Times default to `Africa/Johannesburg` (`SAST`); set `AIMI_LOCAL_TIMEZONE` only when the notification recipient's timezone changes.
 
 Delivery is durable and retry-safe. The watcher writes a pending outbox item before sending through `hermes send --json`, retries the send, and advances `last_change_id` only after Hermes reports success. A failed delivery leaves the alert pending for the next run. The outer Hermes `deliver: telegram` setting remains as a failure fallback. The state file at `~/.hermes/cron/model-catalogue-discovery-notifier.json` is atomic, private, and carries the delivery attempt/result metadata. Delivery is at-least-once: a crash immediately after Telegram accepts a message can cause one duplicate, but cannot silently lose an alert.
 
@@ -296,7 +302,7 @@ Free-model health runs weekly:
 aimi-free-model-health-weekly (da87bcef9fc4)
 ```
 
-One weekly pass over every route the catalogue verifies as no-charge, including NVIDIA NIM's developer tier. It reports the green/orange/red counts and any status transitions since the previous run.
+One weekly pass over every route the catalogue verifies as no-charge, including NVIDIA NIM's developer tier. It reports the green/orange/red counts and any status transitions since the previous run. Runtime-confirmed OpenCode Zen promotion withdrawals are reconciled immediately, rather than waiting for a model ID to disappear from the models endpoint.
 
 Inspect it with:
 

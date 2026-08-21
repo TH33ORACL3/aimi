@@ -5,6 +5,7 @@ import argparse,json,os,sqlite3,sys,shutil,subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from aimi_credentials import load_aimi_credentials
+import deepseek_schedule
 VERSION='aimi/1.2.0'
 ROOT=Path(__file__).resolve().parent; HOME=Path.home()
 # AIMI_DB lets an agent point the CLI at a copy, an export, or a test database
@@ -44,6 +45,16 @@ def summary(c,_):
   'local_harness_installations':c.execute('SELECT COUNT(*) FROM harness_installations WHERE installed=1').fetchone()[0],
   'active_local_model_entries':c.execute('SELECT COUNT(*) FROM harness_model_entries WHERE enabled=1').fetchone()[0],
  },indent=2))
+
+
+def deepseek_status(c, a):
+    """Report whether the current local time is DeepSeek API peak or off-peak."""
+    try:
+        result = deepseek_schedule.status_at(a.at, a.timezone)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(result, indent=2))
+
 def free(c,a):
  q="""SELECT provider_id,model_identifier,display_name,context_window_tokens,max_output_tokens,offer_type,starts_at,ends_at,offer_verified_at FROM currently_free_provider_models WHERE (? IS NULL OR provider_id=?) ORDER BY provider_id,display_name""";rows_json(c.execute(q,(a.provider,a.provider)).fetchall())
 def latest_free_rows(c,provider,limit=10):
@@ -78,6 +89,39 @@ def timeline(c,a):
         ORDER BY date(e.event_time) DESC, e.event_type, model"""
     rows_json(c.execute(q,params).fetchall())
 def providers(c,_):rows_json(c.execute('SELECT provider_id,display_name,api_style,base_url,auth_env_var,pricing_policy,free_definition,last_verified_at FROM providers ORDER BY display_name').fetchall())
+
+def _provider_models_payload(c, provider_id, include_removed=False):
+ provider=c.execute('SELECT provider_id,display_name,official_models_endpoint,base_url FROM providers WHERE provider_id=?',(provider_id,)).fetchone()
+ if not provider:raise SystemExit(f'Provider not found: {provider_id}')
+ status_clause='' if include_removed else " AND pm.endpoint_status NOT IN ('removed','unavailable')"
+ q=f"""SELECT pm.provider_model_id,pm.provider_id,p.display_name provider_name,
+ pm.model_identifier,pm.display_name,pm.description,pm.provider_created_at,
+ pm.endpoint_status,pm.endpoint_first_seen_at,pm.endpoint_last_seen_at,pm.endpoint_removed_at,
+ pm.context_window_tokens,pm.max_input_tokens,pm.max_output_tokens,pm.reasoning,pm.tools,
+ pm.function_calling,pm.structured_outputs,pm.streaming,pm.input_modalities_json,pm.output_modalities_json,
+ (SELECT mt.url FROM monitoring_targets mt WHERE mt.provider_id=pm.provider_id AND mt.target_type='models_endpoint' ORDER BY mt.monitoring_target_id DESC LIMIT 1) endpoint_url,
+ (SELECT mt.last_checked_at FROM monitoring_targets mt WHERE mt.provider_id=pm.provider_id AND mt.target_type='models_endpoint' ORDER BY mt.monitoring_target_id DESC LIMIT 1) endpoint_last_checked_at,
+ (SELECT mt.last_success_at FROM monitoring_targets mt WHERE mt.provider_id=pm.provider_id AND mt.target_type='models_endpoint' ORDER BY mt.monitoring_target_id DESC LIMIT 1) endpoint_last_success_at,
+ (SELECT mt.last_changed_at FROM monitoring_targets mt WHERE mt.provider_id=pm.provider_id AND mt.target_type='models_endpoint' ORDER BY mt.monitoring_target_id DESC LIMIT 1) endpoint_last_changed_at
+ FROM provider_models_v2 pm JOIN providers p USING(provider_id)
+ WHERE pm.provider_id=?{status_clause}
+ ORDER BY COALESCE(pm.display_name,pm.model_identifier),pm.model_identifier"""
+ models=[]
+ for row in c.execute(q,(provider_id,)).fetchall():
+  model=dict(row);pmid=model['provider_model_id']
+  for key in ('input_modalities_json','output_modalities_json'):
+   out_key=key[:-5]
+   model[out_key]=_decode_json(model.pop(key)) if model.get(key) else None
+  model['subscription_access']=[dict(x) for x in c.execute("""SELECT sp.product_slug,sma.access_type,sma.confidence,sma.last_verified_at,sma.notes
+   FROM subscription_model_access sma JOIN subscription_products sp USING(subscription_product_id)
+   WHERE sma.provider_model_id=? ORDER BY sp.product_slug,sma.access_type""",(pmid,)).fetchall()]
+  model['detected_in_endpoint_changes']=c.execute("SELECT COUNT(*) FROM endpoint_changes WHERE provider_id=? AND model_identifier=? AND change_type='model_added'",(provider_id,model['model_identifier'])).fetchone()[0]>0
+  models.append(model)
+ return {'provider_id':provider['provider_id'],'provider_name':provider['display_name'],'official_models_endpoint':provider['official_models_endpoint'],'base_url':provider['base_url'],'include_removed':bool(include_removed),'model_count':len(models),'models':models}
+
+def provider_models(c,a):
+ print(json.dumps(_provider_models_payload(c,a.provider,a.include_removed),indent=2,default=str))
+
 def subscriptions(c,a):
  q="""SELECT sp.product_slug,sp.vendor,sp.display_name,sp.tier_name,sp.product_type,sp.billing_model,sp.monthly_price,sp.currency,sp.product_status,sp.last_verified_at,sp.confidence,
  pe.entitlement_status,pe.relationship_type,pe.organization_label,pe.confirmed_at,pe.confidence entitlement_confidence,
@@ -89,7 +133,21 @@ def subscription(c,a):
  row=c.execute("""SELECT sp.*,pe.entitlement_status,pe.account_label,pe.organization_label,pe.relationship_type,pe.confirmed_at,pe.confirmation_source,pe.confidence entitlement_confidence,pe.notes entitlement_notes FROM subscription_products sp LEFT JOIN personal_subscription_entitlements pe ON pe.subscription_product_id=sp.subscription_product_id WHERE sp.product_slug=?""",(a.product,)).fetchone()
  if not row:raise SystemExit('Subscription product not found')
  links=[dict(x) for x in c.execute("""SELECT sma.access_type,sma.harness_id,sma.harness_model_identifier,pm.provider_id,pm.model_identifier,pm.display_name,sma.quota_json,sma.client_restrictions_json,sma.confidence,sma.last_verified_at,sma.notes FROM subscription_model_access sma LEFT JOIN provider_models_v2 pm USING(provider_model_id) WHERE sma.subscription_product_id=? ORDER BY COALESCE(pm.provider_id,sma.harness_id),COALESCE(pm.model_identifier,sma.harness_model_identifier)""",(row['subscription_product_id'],))]
- out=dict(row);out['models']=links;print(json.dumps(out,indent=2,default=str))
+ out=dict(row);out['models']=links
+ # Keep `models` limited to evidence-linked subscription coverage, but expose
+ # every currently detected route for products whose slug is also a provider.
+ # This prevents endpoint discoveries from disappearing from the normal
+ # subscription view without inventing subscription access semantics.
+ provider=c.execute('SELECT provider_id FROM providers WHERE provider_id=?',(row['product_slug'],)).fetchone()
+ if provider:
+  detected=_provider_models_payload(c,row['product_slug'])
+  out['detected_provider_routes']=detected['models']
+  out['detected_provider_route_count']=detected['model_count']
+  out['unlinked_detected_routes']=[x['model_identifier'] for x in detected['models'] if not x['subscription_access']]
+  out['detected_routes_endpoint']=detected['official_models_endpoint']
+  out['detected_routes_last_checked_at']=next((x['endpoint_last_checked_at'] for x in detected['models'] if x['endpoint_last_checked_at']),None)
+  out['coverage_note']='models contains explicit subscription access records; detected_provider_routes contains all current provider endpoint routes and may include unlinked candidates.'
+ print(json.dumps(out,indent=2,default=str))
 def promotion_accounts(c,a):
  rows=c.execute("""SELECT sp.product_slug,spa.registration_email,spa.account_label,spa.promotion_name,spa.promotion_status,spa.confirmed_at,spa.confirmation_source,spa.confidence,spa.notes
  FROM subscription_promotion_accounts spa JOIN subscription_products sp USING(subscription_product_id)
@@ -579,6 +637,10 @@ def doctor(c,_):
   'active_free_offers_without_end_date':c.execute("SELECT COUNT(*) FROM access_offers WHERE offer_type='temporary_free_window' AND ends_at IS NULL").fetchone()[0],
   'claims_without_capture':c.execute('SELECT COUNT(*) FROM evidence_claims WHERE evidence_capture_id IS NULL').fetchone()[0],
   'unreviewed_endpoint_changes':c.execute('SELECT COUNT(*) FROM endpoint_changes WHERE reviewed=0').fetchone()[0],
+  'detected_model_additions_without_provider_route':[dict(x) for x in c.execute("""SELECT ec.provider_id,ec.model_identifier,MIN(ec.detected_at) first_detected_at
+   FROM endpoint_changes ec LEFT JOIN provider_models_v2 pm ON pm.provider_id=ec.provider_id AND pm.model_identifier=ec.model_identifier
+   WHERE ec.change_type='model_added' AND pm.provider_model_id IS NULL
+   GROUP BY ec.provider_id,ec.model_identifier ORDER BY ec.provider_id,ec.model_identifier""").fetchall()],
   # The recorded order profile is a snapshot, not a preference. Aubrey enables
   # and disables models routinely, so drift here is informational, not a fault.
   # The real question is whether an enabled model still exists at its provider.
@@ -596,7 +658,16 @@ def pi_provider_fragment(c,pid,mid):
  row=c.execute('SELECT pm.*,p.display_name provider_name,p.base_url,p.api_style,p.auth_env_var FROM provider_models_v2 pm JOIN providers p ON p.provider_id=pm.provider_id WHERE pm.provider_id=? AND pm.model_identifier=?',(pid,mid)).fetchone()
  if not row:raise SystemExit('Provider/model route not found')
  inp=json.loads(row['input_modalities_json']) if row['input_modalities_json'] and row['input_modalities_json'].startswith('[') else ['text']
- provider={'name':row['provider_name'],'api':row['api_style'],'baseUrl':row['base_url'],'apiKey':f"${row['auth_env_var']}" if row['auth_env_var'] else None,'models':[{'id':mid,'name':row['display_name'] or mid,'reasoning':bool(row['reasoning']),'input':inp,'contextWindow':row['context_window_tokens'] or 128000,'maxTokens':row['max_output_tokens'] or 16384}]}
+ # OpenCode's Go docs expose Muse Contributor on /v1/responses, while
+ # the rest of the Go catalogue uses /v1/chat/completions. Preserve the
+ # model-level API override so re-registration cannot reintroduce the loop.
+ muse_contributor=pid=='opencode-go' and mid=='muse-spark-1.2-contributor'
+ model={'id':mid,'name':row['display_name'] or mid,
+        'reasoning':bool(row['reasoning']) or muse_contributor,
+        'input':inp,'contextWindow':row['context_window_tokens'] or 128000,
+        'maxTokens':row['max_output_tokens'] or 16384}
+ if muse_contributor:model['api']='openai-responses'
+ provider={'name':row['provider_name'],'api':row['api_style'],'baseUrl':row['base_url'],'apiKey':f"${row['auth_env_var']}" if row['auth_env_var'] else None,'models':[model]}
  return {k:v for k,v in provider.items() if v is not None}
 def pi_fragment(c,a):print(json.dumps({'providers':{a.provider:pi_provider_fragment(c,a.provider,a.model)}},indent=2))
 def write_pi_settings(path,d):
@@ -1112,6 +1183,7 @@ def build_parser():
  x=add('latest','Most recent verified model events');x.add_argument('--limit',type=int,default=20);x.set_defaults(fn=latest)
  x=add('timeline','Release and endpoint timeline for a date range');x.add_argument('--since',required=True,help='ISO date, e.g. 2026-07-18');x.add_argument('--until',help='ISO date, inclusive');x.set_defaults(fn=timeline)
  add('providers','Every known provider with endpoint, auth env var and pricing policy').set_defaults(fn=providers)
+ x=add('provider-models','Every currently detected route for one provider with endpoint freshness and access classification');x.add_argument('provider');x.add_argument('--include-removed',action='store_true');x.set_defaults(fn=provider_models)
  x=add('subscriptions','Subscription products and personal entitlement status');x.add_argument('--mine',action='store_true',help='Only subscriptions Aubrey holds');x.set_defaults(fn=subscriptions)
  x=add('subscription','One subscription product and every route it covers');x.add_argument('product');x.set_defaults(fn=subscription)
  x=add('promotion-accounts','OpenCode Go promotion registration emails and statuses');x.add_argument('product',default='opencode-go',nargs='?');x.set_defaults(fn=promotion_accounts)
@@ -1129,6 +1201,10 @@ def build_parser():
  x=add('monitor-runs','Every official endpoint poll, including unchanged and failed runs');x.add_argument('--provider');x.add_argument('--since');x.add_argument('--until');x.add_argument('--status',choices=['running','success','unchanged','changed','failed','rate_limited']);x.add_argument('--limit',type=int,default=100);x.set_defaults(fn=monitor_runs)
  add('monitor-status','Per-endpoint last check, last change and failure streak').set_defaults(fn=monitor_status)
  add('pi-order','Live Pi enabledModels in exact order, with positions and default').set_defaults(fn=pi_order)
+ x=add('deepseek-status','Whether the current local time is DeepSeek API peak or off-peak')
+ x.add_argument('--timezone',help='IANA timezone, e.g. Africa/Johannesburg; defaults to the machine timezone')
+ x.add_argument('--at',help='ISO-8601 instant for deterministic checks; defaults to now')
+ x.set_defaults(fn=deepseek_status)
  x=add('deepswe','Recorded DeepSWE v1.1 scores (best config per model)');x.add_argument('--benchmark',default='deepswe',help='Benchmark slug (default deepswe)');x.add_argument('--model',help='Filter scored models by slug substring');x.add_argument('--pi',action='store_true',help='Show Pi-enabled models and whether a score is recorded');x.add_argument('--unscored',action='store_true',help='With --pi, only models without a recorded score');x.set_defaults(fn=deepswe)
  x=add('benchmarks','Recorded benchmark scores for any benchmark (best config per model)');x.add_argument('--benchmark',default='deepswe',help='Benchmark slug, e.g. deepswe, swebench_verified, terminal_bench');x.add_argument('--model',help='Filter by canonical slug substring');x.add_argument('--pi',action='store_true',help='Show Pi-enabled models and whether a score is recorded');x.add_argument('--unscored',action='store_true',help='With --pi, only models without a recorded score');x.set_defaults(fn=deepswe)
  add('harnesses','Known harnesses and which are installed locally (live rescan)').set_defaults(fn=harnesses)

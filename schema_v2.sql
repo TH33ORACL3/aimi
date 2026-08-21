@@ -627,7 +627,7 @@ CREATE TABLE IF NOT EXISTS benchmark_scores (
   UNIQUE(canonical_model_id, benchmark, benchmark_version, metric, value_unit, config_text, score_date, source_type)
 );
 
--- indexs (29)
+-- indexs (31)
 CREATE INDEX IF NOT EXISTS idx_provider ON models(provider);
 CREATE INDEX IF NOT EXISTS idx_catagory ON models(catagory);
 CREATE INDEX IF NOT EXISTS idx_model_id ON models(model_id);
@@ -665,6 +665,12 @@ CREATE INDEX IF NOT EXISTS idx_benchmark_scores_model
   ON benchmark_scores(canonical_model_id, benchmark, benchmark_version);
 CREATE INDEX IF NOT EXISTS idx_benchmark_scores_best
   ON benchmark_scores(canonical_model_id, benchmark, benchmark_version, is_best_config);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_temporary_free_window
+        ON access_offers(provider_model_id, offer_type)
+        WHERE offer_type='temporary_free_window' AND ends_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_model_events_free_window_end
+        ON model_events(provider_model_id, event_type, event_time DESC)
+        WHERE event_type='free_window_end';
 
 -- views (8)
 CREATE VIEW IF NOT EXISTS free_models AS
@@ -699,12 +705,13 @@ WHERE t.harness_model_test_id=(
   ORDER BY datetime(t2.tested_at) DESC,t2.harness_model_test_id DESC LIMIT 1
 );
 CREATE VIEW IF NOT EXISTS currently_free_provider_models AS
-SELECT pm.*,ao.offer_type,ao.starts_at,ao.ends_at,ao.first_observed_at,ao.last_observed_at,ao.quota_json,ao.rate_limits_json,ao.last_verified_at AS offer_verified_at
-FROM provider_models_v2 pm JOIN access_offers ao ON ao.provider_model_id=pm.provider_model_id
-WHERE ao.offer_type IN ('genuine_zero_price','free_tier_quota','temporary_free_window')
-  AND (ao.starts_at IS NULL OR datetime(ao.starts_at)<=datetime('now'))
-  AND (ao.ends_at IS NULL OR datetime(ao.ends_at)>datetime('now'))
-  AND pm.endpoint_status='available';
+           SELECT pm.*,ao.offer_type,ao.starts_at,ao.ends_at,ao.quota_json,ao.rate_limits_json,ao.last_verified_at AS offer_verified_at
+           FROM provider_models_v2 pm
+           JOIN access_offers ao ON ao.provider_model_id=pm.provider_model_id
+           WHERE ao.offer_type IN ('genuine_zero_price','temporary_free_window','free_tier_quota')
+             AND (ao.starts_at IS NULL OR datetime(ao.starts_at)<=datetime('now'))
+             AND (ao.ends_at IS NULL OR datetime(ao.ends_at)>datetime('now'))
+             AND pm.endpoint_status='available';
 CREATE VIEW IF NOT EXISTS current_free_model_health AS
 SELECT f.provider_model_id,f.provider_id,f.model_identifier,f.display_name,f.offer_type,f.offer_verified_at,
        s.last_tested_at,s.last_status,

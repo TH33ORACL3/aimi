@@ -26,6 +26,12 @@
       "expected": 0
     },
     {
+      "check": "free_window_end_events_have_capture",
+      "passed": true,
+      "value": 0,
+      "expected": 0
+    },
+    {
       "check": "confident_claims_have_capture",
       "passed": true,
       "value": 0,
@@ -70,7 +76,7 @@
     {
       "check": "endpoint_changes_reviewed",
       "passed": false,
-      "value": 4719,
+      "value": 5482,
       "expected": 0
     },
     {
@@ -117,20 +123,20 @@
     }
   ],
   "metrics": {
-    "provider_routes": 1030,
-    "canonical_models": 866,
-    "active_free_routes": 164,
-    "verified_events": 996,
-    "evidence_sources": 69,
-    "claims": 147,
+    "provider_routes": 1105,
+    "canonical_models": 890,
+    "active_free_routes": 174,
+    "verified_events": 1054,
+    "evidence_sources": 73,
+    "claims": 148,
     "installed_harnesses": 12,
-    "pi_enabled_models": 17,
+    "pi_enabled_models": 24,
     "pi_snapshot_order_differs": true,
     "benchmark_scores": 419,
-    "deepswe_scored_models": 27,
-    "free_health_green": 41,
-    "free_health_orange": 1,
-    "free_health_red": 83,
-    "free_health_daily_rows": 855
+    "deepswe_scored_models": 25,
+    "free_health_green": 52,
+    "free_health_orange": 2,
+    "free_health_red": 89,
+    "free_health_daily_rows": 1020
   }
 }
