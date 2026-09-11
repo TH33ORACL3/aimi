@@ -31,7 +31,14 @@ progress.md
 *-task_plan.md
 *-findings.md
 *-progress.md
+*.task_plan.md
+*.findings.md
+*.progress.md
 research.md
+
+# Local generated scratch output
+/tmp/
+/r.json
 
 # Local tool state
 .playwright-cli/
