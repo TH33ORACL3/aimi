@@ -25,6 +25,11 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from catalogue_classification import (
+    classify_capability_tags,
+    classify_input_type,
+    classify_output_type,
+)
 from model_news_eligibility import (
     annotate_routes,
     classify_routes,
@@ -149,28 +154,83 @@ def same_day_context(
     selected_date: date | None = None,
 ) -> dict:
     local_date, start_utc, end_utc = local_day_bounds(selected_date)
-    additions = [
-        dict(row)
-        for row in connection.execute(
-            """
-            SELECT ec.endpoint_change_id, ec.provider_id, ec.model_identifier,
-                   ec.detected_at, COALESCE(pm.display_name, ec.model_identifier) AS display_name,
-                   pm.endpoint_first_seen_at, pm.provider_created_at,
-                   pm.context_window_tokens, pm.max_output_tokens,
-                   pm.reasoning, pm.tools, pm.function_calling, pm.structured_outputs,
-                   pm.description
-            FROM endpoint_changes ec
-            LEFT JOIN provider_models_v2 pm
-              ON pm.provider_id = ec.provider_id
-             AND pm.model_identifier = ec.model_identifier
-            WHERE ec.change_type = 'model_added'
-              AND datetime(ec.detected_at) >= datetime(?)
-              AND datetime(ec.detected_at) < datetime(?)
-            ORDER BY datetime(ec.detected_at), ec.endpoint_change_id
-            """,
-            (start_utc, end_utc),
-        ).fetchall()
-    ]
+    try:
+        additions = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT ec.endpoint_change_id, ec.provider_id, ec.model_identifier,
+                       ec.detected_at, COALESCE(pm.display_name, ec.model_identifier) AS display_name,
+                       pm.endpoint_first_seen_at, pm.provider_created_at,
+                       pm.context_window_tokens, pm.max_output_tokens,
+                       pm.reasoning, pm.tools, pm.function_calling, pm.structured_outputs,
+                       pm.input_modalities_json, pm.output_modalities_json,
+                       pm.description
+                FROM endpoint_changes ec
+                LEFT JOIN provider_models_v2 pm
+                  ON pm.provider_id = ec.provider_id
+                 AND pm.model_identifier = ec.model_identifier
+                WHERE ec.change_type = 'model_added'
+                  AND datetime(ec.detected_at) >= datetime(?)
+                  AND datetime(ec.detected_at) < datetime(?)
+                ORDER BY datetime(ec.detected_at), ec.endpoint_change_id
+                """,
+                (start_utc, end_utc),
+            ).fetchall()
+        ]
+    except sqlite3.OperationalError as exc:
+        if "input_modalities_json" in str(exc) or "no such column" in str(exc):
+            additions = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT ec.endpoint_change_id, ec.provider_id, ec.model_identifier,
+                           ec.detected_at, COALESCE(pm.display_name, ec.model_identifier) AS display_name,
+                           pm.endpoint_first_seen_at, pm.provider_created_at,
+                           pm.context_window_tokens, pm.max_output_tokens,
+                           pm.reasoning, pm.tools, pm.function_calling, pm.structured_outputs,
+                           pm.description
+                    FROM endpoint_changes ec
+                    LEFT JOIN provider_models_v2 pm
+                      ON pm.provider_id = ec.provider_id
+                     AND pm.model_identifier = ec.model_identifier
+                    WHERE ec.change_type = 'model_added'
+                      AND datetime(ec.detected_at) >= datetime(?)
+                      AND datetime(ec.detected_at) < datetime(?)
+                    ORDER BY datetime(ec.detected_at), ec.endpoint_change_id
+                    """,
+                    (start_utc, end_utc),
+                ).fetchall()
+            ]
+        else:
+            raise
+    for item in additions:
+        input_mods = []
+        if item.get("input_modalities_json"):
+            try:
+                input_mods = json.loads(item["input_modalities_json"])
+            except (json.JSONDecodeError, TypeError):
+                input_mods = []
+        output_mods = []
+        if item.get("output_modalities_json"):
+            try:
+                output_mods = json.loads(item["output_modalities_json"])
+            except (json.JSONDecodeError, TypeError):
+                output_mods = []
+        item["input_type"] = classify_input_type(input_mods)
+        item["output_type"] = classify_output_type(output_mods)
+        item["capability_tags"] = classify_capability_tags(
+            input_modalities=input_mods,
+            output_modalities=output_mods,
+            metadata={
+                "reasoning": item.get("reasoning"),
+                "tools": item.get("tools"),
+                "function_calling": item.get("function_calling"),
+                "structured_outputs": item.get("structured_outputs"),
+                "description": item.get("description"),
+                "name": item.get("display_name") or item.get("model_identifier"),
+            },
+        )
     verified_events = [
         dict(row)
         for row in connection.execute(
@@ -370,7 +430,7 @@ Workflow:
 2. Verify whether each canonical model is a real new release or a meaningful aggregator route addition. Prefer the maker's official docs/account for release claims. A provider listing alone is not enough. OpenCode/OpenRouter announcements can verify their route availability but not a maker release unless they say so explicitly. Never publish a bulk-sync or origin-provider endpoint backfill merely because it is present in the catalogue.
 3. Use all earlier verified releases from the same SAST day in the input. Calculate exact elapsed times. If releases form a rapid sequence, make that cadence part of the narrative. Never claim one company responded to another unless a primary source establishes causation. Safe wording includes "the third major model to surface today" or "arrived X minutes after".
 4. Dedupe provider aliases and routes by canonical model. Check existing AZ Labs News slugs and today's package summaries. Update an existing same-model article instead of publishing a duplicate. If several verified releases form one coherent wave, a single roundup article and social package is allowed.
-5. For a verified release, follow the loaded `azlabs-editorial-publishing` skill completely: isolated worktree, British English, humanized copy, primary citations, lawful hero image, Fish Audio story/TLDR, validation, AZLabsAI GitHub preflight, PR, green checks, merge and live HTTP verification. Do not call the article published before production is live.
+5. For a verified release, follow the loaded `azlabs-editorial-publishing` skill completely: isolated worktree, British English, humanized copy, primary citations, lawful hero image, Fish Audio story/TLDR, validation, AZLabsAI GitHub preflight, PR, green checks, merge and live HTTP verification. Do not call the article published before production is live. Always include the structured `modelMetadata` block in `src/data/news.ts` (modelId, provider, servingRoutes, contextWindow, maxOutputTokens, inputType, outputType, inputModalities, outputModalities, capabilityTags, pricing) using AIMI's verified capability and modality schema.
 6. Use the deployed `/news/<slug>/twitter-image` route as the default X visual. Download the final 1200x630 image to {asset_dir}/<slug>-twitter.png and verify it is a valid non-empty image.
 7. Draft one concise root X post for @TH33ORACL3 with the useful release fact and the same-day narrative. Draft a second threaded reply containing the live AZ Labs article URL and a useful caveat. Run both through `humanizer`. Do not use em dashes. Publish the exact prepared visual thread through `post-to-x` in the browser as @TH33ORACL3, verify both post URLs and the reply relationship, then send Aubrey a Telegram notification containing the root-post URL, threaded article-reply URL and article URL. Do not use bird for posting.
 11. Write {result_path} atomically as JSON before your final response. Required shape:

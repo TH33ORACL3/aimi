@@ -21,8 +21,8 @@
     },
     {
       "check": "verified_events_have_immutable_capture",
-      "passed": false,
-      "value": 2,
+      "passed": true,
+      "value": 0,
       "expected": 0
     },
     {
@@ -69,40 +69,38 @@
     },
     {
       "check": "pi_enabled_models_exist_at_provider",
-      "passed": false,
-      "value": [
-        "openrouter/z-ai/glm-5.2:free"
-      ],
+      "passed": true,
+      "value": 0,
       "expected": 0
     },
     {
       "check": "endpoint_changes_reviewed",
       "passed": false,
-      "value": 13548,
+      "value": 13672,
       "expected": 0
     },
     {
       "check": "monitoring_targets_healthy",
-      "passed": false,
-      "value": 1,
+      "passed": true,
+      "value": 0,
       "expected": 0
     },
     {
       "check": "free_health_targets_still_free",
-      "passed": false,
-      "value": 3,
+      "passed": true,
+      "value": 0,
       "expected": 0
     },
     {
       "check": "active_free_routes_have_health_status",
-      "passed": false,
-      "value": 2,
+      "passed": true,
+      "value": 0,
       "expected": 0
     },
     {
       "check": "free_health_history_within_retention",
-      "passed": false,
-      "value": 125,
+      "passed": true,
+      "value": 0,
       "expected": 0
     },
     {
@@ -125,20 +123,20 @@
     }
   ],
   "metrics": {
-    "provider_routes": 1219,
+    "provider_routes": 1267,
     "canonical_models": 965,
     "active_free_routes": 141,
-    "verified_events": 1146,
+    "verified_events": 1144,
     "evidence_sources": 82,
     "claims": 155,
-    "installed_harnesses": 5,
-    "pi_enabled_models": 12,
+    "installed_harnesses": 13,
+    "pi_enabled_models": 26,
     "pi_snapshot_order_differs": true,
     "benchmark_scores": 541,
     "deepswe_scored_models": 25,
     "free_health_green": 24,
-    "free_health_orange": 4,
+    "free_health_orange": 3,
     "free_health_red": 90,
-    "free_health_daily_rows": 539
+    "free_health_daily_rows": 435
   }
 }

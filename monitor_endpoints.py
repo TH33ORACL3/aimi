@@ -10,6 +10,7 @@ from datetime import datetime,timezone
 from decimal import Decimal,InvalidOperation
 from pathlib import Path
 from aimi_credentials import load_aimi_credentials
+from catalogue_classification import extract_modalities
 from free_offer_reconciliation import (
     has_free_window_end,
     reconcile_active_temporary_free_windows,
@@ -162,8 +163,8 @@ def rows(pid,payload,key):
   context=numeric(first_present(x.get('context_length'),top.get('context_length'),x.get('max_context_length'),x.get('inputTokenLimit'),x.get('context_window_tokens'),x.get('contextWindow'),x.get('context')))
   max_input=numeric(first_present(x.get('max_input_tokens'),x.get('max_input'),x.get('max_prompt_tokens'),top.get('max_prompt_tokens'),x.get('inputTokenLimit')))
   max_output=numeric(first_present(x.get('max_output_tokens'),x.get('max_output'),x.get('outputTokenLimit'),top.get('max_completion_tokens')))
-  input_modalities=as_list(first_present(x.get('input_modalities'),architecture.get('input_modalities'),x.get('modalities')))
-  output_modalities=as_list(first_present(x.get('output_modalities'),architecture.get('output_modalities'),x.get('modalities')))
+  input_modalities=extract_modalities(x, 'input_modalities') or as_list(first_present(x.get('input_modalities'),architecture.get('input_modalities'),x.get('modalities')))
+  output_modalities=extract_modalities(x, 'output_modalities') or as_list(first_present(x.get('output_modalities'),architecture.get('output_modalities'),x.get('modalities')))
   display_name=first_present(x.get('displayName'),x.get('display_name'))
   if pid=='cline':
    display_name=CLINE_DISPLAY_NAMES.get(mid,display_name)

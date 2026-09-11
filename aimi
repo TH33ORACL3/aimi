@@ -5,6 +5,7 @@ import argparse,json,os,sqlite3,sys,shutil,subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from aimi_credentials import load_aimi_credentials
+from catalogue_classification import classify_input_type, classify_output_type, classify_capability_tags
 import deepseek_schedule
 VERSION='aimi/1.2.0'
 ROOT=Path(__file__).resolve().parent; HOME=Path.home()
@@ -115,6 +116,9 @@ def _provider_models_payload(c, provider_id, include_removed=False):
   for key in ('input_modalities_json','output_modalities_json'):
    out_key=key[:-5]
    model[out_key]=_decode_json(model.pop(key)) if model.get(key) else None
+  model['input_type']=classify_input_type(model.get('input_modalities'))
+  model['output_type']=classify_output_type(model.get('output_modalities'))
+  model['capability_tags']=classify_capability_tags(model.get('input_modalities'),model.get('output_modalities'),model)
   model['subscription_access']=[dict(x) for x in c.execute("""SELECT sp.product_slug,sma.access_type,sma.confidence,sma.last_verified_at,sma.notes
    FROM subscription_model_access sma JOIN subscription_products sp USING(subscription_product_id)
    WHERE sma.provider_model_id=? ORDER BY sp.product_slug,sma.access_type""",(pmid,)).fetchall()]
@@ -123,7 +127,17 @@ def _provider_models_payload(c, provider_id, include_removed=False):
  return {'provider_id':provider['provider_id'],'provider_name':provider['display_name'],'official_models_endpoint':provider['official_models_endpoint'],'base_url':provider['base_url'],'include_removed':bool(include_removed),'model_count':len(models),'models':models}
 
 def provider_models(c,a):
- print(json.dumps(_provider_models_payload(c,a.provider,a.include_removed),indent=2,default=str))
+ payload=_provider_models_payload(c,a.provider,a.include_removed)
+ models=payload['models']
+ if getattr(a,'input_type',None):
+  models=[m for m in models if m.get('input_type')==a.input_type]
+ if getattr(a,'output_type',None):
+  models=[m for m in models if m.get('output_type')==a.output_type]
+ if getattr(a,'capability',None):
+  models=[m for m in models if a.capability in m.get('capability_tags',[])]
+ payload['models']=models
+ payload['model_count']=len(models)
+ print(json.dumps(payload,indent=2,default=str))
 
 def subscriptions(c,a):
  q="""SELECT sp.product_slug,sp.vendor,sp.display_name,sp.tier_name,sp.product_type,sp.billing_model,sp.monthly_price,sp.currency,sp.product_status,sp.last_verified_at,sp.confidence,
@@ -340,14 +354,19 @@ def _decode_json(value):
 
 
 def _capability_summary(item):
+    in_mod = item.get('input_modalities')
+    out_mod = item.get('output_modalities')
     return {
         'reasoning':item.get('reasoning'),
         'tools':item.get('tools'),
         'function_calling':item.get('function_calling'),
         'structured_outputs':item.get('structured_outputs'),
         'streaming':item.get('streaming'),
-        'input_modalities':item.get('input_modalities'),
-        'output_modalities':item.get('output_modalities'),
+        'input_modalities':in_mod,
+        'output_modalities':out_mod,
+        'input_type':classify_input_type(in_mod),
+        'output_type':classify_output_type(out_mod),
+        'capability_tags':classify_capability_tags(in_mod, out_mod, item),
         'context_window_tokens':item.get('context_window_tokens'),
         'max_input_tokens':item.get('max_input_tokens'),
         'max_output_tokens':item.get('max_output_tokens'),
@@ -1186,7 +1205,7 @@ def build_parser():
  x=add('latest','Most recent verified model events');x.add_argument('--limit',type=int,default=20);x.set_defaults(fn=latest)
  x=add('timeline','Release and endpoint timeline for a date range');x.add_argument('--since',required=True,help='ISO date, e.g. 2026-07-18');x.add_argument('--until',help='ISO date, inclusive');x.set_defaults(fn=timeline)
  add('providers','Every known provider with endpoint, auth env var and pricing policy').set_defaults(fn=providers)
- x=add('provider-models','Every currently detected route for one provider with endpoint freshness and access classification');x.add_argument('provider');x.add_argument('--include-removed',action='store_true');x.set_defaults(fn=provider_models)
+ x=add('provider-models','Every currently detected route for one provider with endpoint freshness and access classification');x.add_argument('provider');x.add_argument('--include-removed',action='store_true');x.add_argument('--input-type','--input',dest='input_type',help='Filter by input type (e.g. text-input, text+image-input, multimodal-input)');x.add_argument('--output-type','--output',dest='output_type',help='Filter by output type (e.g. text-output, image-output, speech-output)');x.add_argument('--capability',dest='capability',help='Filter by capability tag (e.g. vision, image-generation, reasoning, tools)');x.set_defaults(fn=provider_models)
  x=add('subscriptions','Subscription products and personal entitlement status');x.add_argument('--mine',action='store_true',help='Only subscriptions Aubrey holds');x.set_defaults(fn=subscriptions)
  x=add('subscription','One subscription product and every route it covers');x.add_argument('product');x.set_defaults(fn=subscription)
  x=add('promotion-accounts','OpenCode Go promotion registration emails and statuses');x.add_argument('product',default='opencode-go',nargs='?');x.set_defaults(fn=promotion_accounts)

@@ -627,7 +627,7 @@ CREATE TABLE IF NOT EXISTS benchmark_scores (
   UNIQUE(canonical_model_id, benchmark, benchmark_version, metric, value_unit, config_text, score_date, source_type)
 );
 
--- indexs (31)
+-- indexs (32)
 CREATE INDEX IF NOT EXISTS idx_provider ON models(provider);
 CREATE INDEX IF NOT EXISTS idx_catagory ON models(catagory);
 CREATE INDEX IF NOT EXISTS idx_model_id ON models(model_id);
@@ -671,6 +671,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_active_temporary_free_window
 CREATE INDEX IF NOT EXISTS idx_model_events_free_window_end
         ON model_events(provider_model_id, event_type, event_time DESC)
         WHERE event_type='free_window_end';
+CREATE INDEX IF NOT EXISTS idx_endpoint_changes_reviewed
+    ON endpoint_changes(reviewed, detected_at DESC);
 
 -- views (8)
 CREATE VIEW IF NOT EXISTS free_models AS

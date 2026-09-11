@@ -50,8 +50,98 @@ def extract_modalities(item: dict[str, Any], key: str) -> list[str] | None:
     if value is None:
         value = architecture.get(key)
     if value is None:
+        value = architecture.get("modality")
+    if value is None:
         value = item.get("modalities")
     return normalise_modalities(value, side)
+
+
+def classify_input_type(input_modalities: Any) -> str:
+    """Return canonical input type label.
+
+    Categorization contract:
+    - Text only (or text+file): 'text-input'
+    - Image only: 'image-input'
+    - Text and image: 'text+image-input'
+    - Text and audio: 'text+audio-input'
+    - Audio only: 'audio-input'
+    - 3+ modalities or video: 'multimodal-input'
+    """
+    inputs = set(normalise_modalities(input_modalities, "input") or ["text"])
+    media = inputs - {"file"}
+    if not media or media == {"text"}:
+        return "text-input"
+    if media == {"image"}:
+        return "image-input"
+    if media == {"text", "image"}:
+        return "text+image-input"
+    if media == {"text", "audio"}:
+        return "text+audio-input"
+    if media == {"audio"}:
+        return "audio-input"
+    if len(media) >= 3 or "video" in media:
+        return "multimodal-input"
+    return "+".join(sorted(media)) + "-input"
+
+
+def classify_output_type(output_modalities: Any) -> str:
+    """Return non-text output types when present; default to 'text-output' otherwise."""
+    outputs = set(normalise_modalities(output_modalities, "output") or ["text"])
+    if "image" in outputs:
+        return "image-output"
+    if "video" in outputs:
+        return "video-output"
+    if "audio" in outputs:
+        return "speech-output"
+    if "embedding" in outputs:
+        return "embedding-output"
+    return "text-output"
+
+
+def classify_capability_tags(
+    input_modalities: Any,
+    output_modalities: Any,
+    metadata: dict[str, Any] | None = None,
+) -> list[str]:
+    """Return granular, accurate capability tags replacing the misleading 'image' label."""
+    inputs = set(normalise_modalities(input_modalities, "input") or [])
+    outputs = set(normalise_modalities(output_modalities, "output") or ["text"])
+    meta = metadata or {}
+    tags: list[str] = []
+
+    # Visual modalities
+    has_image_in = "image" in inputs
+    has_image_out = "image" in outputs
+    if has_image_in and not has_image_out:
+        tags.extend(["vision", "image-understanding"])
+    elif has_image_in and has_image_out:
+        tags.extend(["vision", "image-generation", "image-to-image"])
+    elif has_image_out:
+        tags.append("image-generation")
+
+    # Video modalities
+    if "video" in inputs:
+        tags.append("video-understanding")
+    if "video" in outputs:
+        tags.append("video-generation")
+
+    # Audio modalities
+    if "audio" in inputs:
+        tags.extend(["audio-input", "speech-transcription"])
+    if "audio" in outputs:
+        tags.extend(["speech-output", "speech-synthesis"])
+
+    # Functional capabilities
+    if meta.get("reasoning") or meta.get("supports_reasoning") or meta.get("thinking"):
+        tags.append("reasoning")
+    if meta.get("tools") or meta.get("supports_tools") or meta.get("function_calling"):
+        tags.append("tools")
+    if meta.get("structured_outputs") or meta.get("supports_structured_output"):
+        tags.append("structured-outputs")
+    if meta.get("streaming") or meta.get("supports_streaming"):
+        tags.append("streaming")
+
+    return sorted(list(dict.fromkeys(tags)))
 
 
 def _name_category(model_id: str, name: str) -> str:
