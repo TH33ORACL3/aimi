@@ -258,6 +258,11 @@ def upsert_endpoint_offer(c,pid,provider_model_id,x,source_id,capture_id):
  if not price:return
  if pid=='openrouter' and is_free(pid,x):return
  offer_type='paid' if price.get('input') is not None or price.get('output') is not None or price.get('request') is not None else 'unknown'
+ if offer_type=='paid':
+  # A model observed with a price must not keep a stale open free offer:
+  # the free view matches any open free-type offer, so close them.
+  c.execute("""UPDATE access_offers SET ends_at=COALESCE(ends_at,?),last_observed_at=?
+   WHERE provider_model_id=? AND offer_type IN ('genuine_zero_price','temporary_free_window','free_tier_quota') AND ends_at IS NULL""",(NOW,NOW,provider_model_id))
  terms=f"Official {pid} models endpoint reported pricing ({price.get('unit')})."
  existing=c.execute("SELECT access_offer_id FROM access_offers WHERE provider_model_id=? AND offer_type=? AND starts_at IS NULL ORDER BY access_offer_id DESC LIMIT 1",(provider_model_id,offer_type)).fetchone()
  values=(price.get('input'),price.get('output'),price.get('cache_read'),price.get('cache_write'),price.get('request'))
@@ -542,6 +547,8 @@ def poll(c,pid,url,env,key):
   upsert_endpoint_offer(c,pid,pm,x,sid,cap)
   record_endpoint_events(c,pm,x,sid,cap)
   if is_free(pid,x):
+   # Symmetric closure: a model observed as free must not keep a stale paid offer.
+   c.execute("UPDATE access_offers SET ends_at=COALESCE(ends_at,?) WHERE provider_model_id=? AND offer_type='paid' AND ends_at IS NULL",(NOW,pm))
    typ='genuine_zero_price' if pid=='openrouter' else 'temporary_free_window'; terms='Endpoint reports zero input/output price' if pid=='openrouter' else 'Official model ID ends in -free; duration unpublished'
    # OpenCode can keep a withdrawn promotion listed in /models. An
    # authoritative runtime free_window_end event must not be reopened by the

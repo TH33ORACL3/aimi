@@ -266,3 +266,209 @@ Route by the exact harness name before any model-config write. For ZCode, inspec
 - **Notes**: Added permanent routing rules and restored CCR's original display names before editing ZCode.
 
 ---
+
+## [LRN-20260819-AIMI-SELF] correction
+
+**Logged**: 2026-08-19T20:40:00+02:00
+**Priority**: high
+**Status**: pending
+**Area**: infra
+
+### Summary
+For Aubrey's forensic award review, do not delegate to subagents when the configured client model is unavailable or quota-exhausted; complete the review directly.
+
+### Details
+Aubrey explicitly clarified that he wants the analysis performed by the primary agent only. The review had already been completed directly, but failed background subagent attempts created unnecessary quota-error notifications.
+
+### Suggested Action
+Respect explicit no-subagent instructions immediately. When the user names a model as unavailable or says quota is exhausted, do not launch agents using that route. Continue with local extraction and direct analysis.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `tmp/pdfs/award/award-pages-indexed.txt`
+- Tags: correction, subagents, quota, forensic-review
+
+---
+
+## [LRN-20260820-AIMI-004] correction
+
+**Logged**: 2026-08-20T07:40:00+02:00
+**Priority**: high
+**Status**: resolved
+**Area**: config
+
+### Summary
+Pi's effective custom model settings live in `~/.pi/agent/models.json`; changing a secondary model catalogue does not wire the model picker.
+
+### Details
+The contributor entry in `models-store.json` had the desired context, output, and thinking metadata, but the actual Pi custom-provider entry in `models.json` still had `128000` context, `16384` max output, and no `thinkingLevelMap`. Pi therefore exposed only the standard levels through `high`. The model picker must receive explicit non-null mappings for `xhigh`; unsupported `max` should be omitted rather than aliased.
+
+### Suggested Action
+When configuring a Pi custom route, update and validate `~/.pi/agent/models.json`, set `settings.json` to the supported top level, and test both a fresh default launch and an explicit `:xhigh` model suffix.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `~/.pi/agent/models.json`, `~/.pi/agent/settings.json`, `~/.pi/agent/agents/*.md`
+- Tags: correction, pi, thinking-levels, xhigh, models-json
+
+### Resolution
+- **Resolved**: 2026-08-20T07:40:00+02:00
+- **Notes**: Updated the live custom-provider config, default selection, all 10 subagent profiles, and verified fresh default plus explicit xhigh smoke tests.
+
+---
+
+## [LRN-20260822-OXA] correction
+
+**Logged**: 2026-08-22T18:42:00+02:00
+**Priority**: medium
+**Status**: resolved
+**Area**: config
+
+### Summary
+Pal's intended OpenCode Go default is `opencode-go/ox-alpha-free`, not `opencode-go/deepseek-v4-flash`.
+
+### Details
+The initial fallback choice was applied from the known-working DeepSeek Flash route. Aubrey corrected the intended OpenCode Go model to `ox-alpha-free`, which is already present in Pal's mirrored 39-model scope at position 24.
+
+### Suggested Action
+When mirroring a scoped list, confirm the intended default model separately from the known-working smoke-test fallback before applying the default.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `/root/.pi/agent/settings.json`
+- Tags: correction, pal, opencode-go, ox-alpha-free
+
+### Resolution
+- **Resolved**: 2026-08-22T18:42:00+02:00
+- **Notes**: Pal now defaults to `opencode-go/ox-alpha-free`; Hyperfine smoke test returned `OK`.
+
+---
+
+## [LRN-20260822-DFL] default-flip-anomaly
+
+**Logged**: 2026-08-22T18:51:00+02:00
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+MacBook `~/.pi/agent/settings.json` default flipped from `openai-codex/gpt-5.6-luna` to `opencode-go/deepseek-v4-flash` between 18:08 and 18:49 SAST without an explicit write from this session.
+
+### Details
+The first `pi-remove` backup (18:49:31) already showed the flipped default with 39 models, so the change predated today's removals. No local settings write was issued in this session before that point; only read-only inspections, remote (Pal/AJ) writes, and local hyperfine Pi runs occurred. The cause is unidentified.
+
+### Suggested Action
+Investigate whether Pi CLI writes its default on model-fallback paths (e.g. failed `--model` runs) or whether another agent/cron touched the file. Restore was applied; verify it stays stable.
+
+### Metadata
+- Source: anomaly
+- Related Files: `~/.pi/agent/settings.json`
+- Tags: pi, settings, default-model, anomaly
+
+---
+
+## [LRN-20260826-BUL] correction
+
+**Logged**: 2026-08-26T14:23:18+02:00
+**Priority**: high
+**Status**: in_progress
+**Area**: backend
+
+### Summary
+AIMI endpoint `model_added` events must not be treated as public model-news candidates when they come from a bulk catalogue synchronisation.
+
+### Details
+A manual OpenAI models-endpoint pull exposed more than 200 existing IDs; AIMI subsequently recorded 12 OpenAI additions in one monitoring run. These are endpoint first-seen observations, not evidence that the models were released that day. Public website/X posting should be reserved for genuinely news-relevant same-day releases or a model aggregator newly exposing a previously unavailable model.
+
+### Suggested Action
+Gate discovery-to-news generation on release-day evidence or a meaningful single-model aggregator addition, and suppress bulk endpoint syncs. Add regression tests for batch discovery, same-day release, and aggregator-addition cases.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `model_discovery_notifier.py`, `model_release_desk.py`, `monitor_endpoints.py`
+- Tags: correction, model-discovery, bulk-sync, website, x, news
+
+---
+
+## [LRN-20260827-PIW] correction
+
+**Logged**: 2026-08-27T00:35:50+02:00
+**Priority**: high
+**Status**: resolved
+**Area**: config
+
+### Summary
+For Pi context-window questions, Aubrey requires the effective value from Pi's local configuration, not AIMI catalogue evidence or another provider route.
+
+### Details
+Pi's built-in GPT-5.6 Codex models default to 272000 in the effective model metadata. The persistent override belongs under `providers.openai-codex.modelOverrides` in `~/.pi/agent/models.json`; overrides under `providers.openai` do not change the `openai-codex/*` routes.
+
+### Suggested Action
+Keep all three `gpt-5.6-*` Codex overrides explicitly set to `contextWindow: 1000000`, then verify by reloading Pi's model registry and inspecting the effective local configuration only.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `~/.pi/agent/models.json`, `~/.pi/agent/settings.json`
+- Tags: correction, pi, codex, context-window, persistence
+
+### Resolution
+- **Resolved**: 2026-08-27T00:39:00+02:00
+- **Notes**: Added the three `openai-codex` model-level overrides. A fresh `pi --list-models` process reports `1M` for Luna, Terra, and Sol, and all three `pi -p 'reply OK'` smoke tests passed.
+
+---
+
+## [LRN-20260827-MERGE-001] best_practice
+
+**Logged**: 2026-08-27T11:08:15+02:00
+**Priority**: high
+**Status**: resolved
+**Area**: config
+
+### Summary
+Pi custom-provider API keys should use plain `$ENV_VAR` references when the environment is already managed by the shell; interactive `!command` resolvers can inject startup banners into HTTP headers.
+
+### Details
+The Merge route was initially made launcher-independent with `!zsh -lic ...`. In a restored interactive shell, zsh emitted a `Restored session: ...` banner before the key. Pi passed the complete multiline command output to `Headers.append`, producing an invalid Bearer header. Filtering a pipeline inside the command did not help because startup output occurred before the pipeline. The provider already followed the same plain environment convention as all working providers, and a fresh normal zsh process inherited the key correctly.
+
+### Suggested Action
+Prefer `apiKey: "$ENV_VAR"` in Pi `models.json` for shell-managed credentials. Verify with `pi auth check`, `pi --list-models`, and a fresh inference whose session record confirms the exact provider/model and successful stop reason. Never treat a same-text reply as proof without provider metadata.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `~/.pi/agent/models.json`, `~/.pi/agent/settings.json`, `~/.zshrc`
+- Tags: pi, custom-provider, env-var, command-substitution, session-restore
+
+### Resolution
+- **Resolved**: 2026-08-27T11:08:15+02:00
+- **Notes**: Restored `$MERGE_API_KEY`, preserved the global 28-model ordered scope with Merge at 28/28, and verified an actual home-directory Pi request returned `OK` with `provider=merge-gateway`, `model=deepseek/deepseek-v4-flash`, `stopReason=stop`, and no error.
+
+---
+
+## [LRN-20260902-001] correction
+
+**Logged**: 2026-09-02T21:12:43+02:00
+**Priority**: high
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+Time-window model-change checks must use Pal's canonical AIMI state and Telegram monitor alerts, not the stale MacBook checkout.
+
+### Details
+Aubrey asked whether models had been added or removed in the last one or two hours. I queried the project-local `python3 aimi changes` database, which had not been monitored since the previous day, and then queried live endpoints after the transient Muse Spark 1.3 routes had already disappeared. Pal's 15-minute endpoint monitor had correctly recorded both the add and removal and Katara had delivered the Telegram alert, but I did not inspect that Telegram history until Aubrey explicitly directed me to it.
+
+### Suggested Action
+For current AIMI answers on macOS, use the Pal-forwarding `aimi` command, check `monitor-status` freshness, filter `changes` by the requested UTC window, inspect both OpenCode Go and Zen with `--include-removed`, and read Katara's Telegram notifications when an alert is referenced. Never use `python3 aimi` or the local `aimi.db` for current operational conclusions.
+
+### Metadata
+- Source: user_feedback
+- Related Files: `/Users/TH33_ORACL3/.pi/agent/AGENTS.md`, `/Users/TH33_ORACL3/.agents/skills/ai-model-index/SKILL.md`, `/Users/TH33_ORACL3/.agents/skills/ai-model-index/scripts/catalogue`
+- Tags: correction, aimi, pal-first, telegram, opencode-go, opencode-zen, model-removal
+
+### Resolution
+- **Resolved**: 2026-09-02T21:19:55+02:00
+- **Completed**: 2026-09-02T21:19:55+02:00
+- **Verified**: `skills/scripts/catalogue changes --since ... --type model_removed` returned the Pal-recorded Muse 1.3 Go removal, and `provider-models opencode-zen --include-removed` returned the Zen removal.
+- **Notes**: Updated persistent routing rules and changed the catalogue wrapper so operational AIMI reads on macOS forward to Pal while local harness/configuration commands remain local.
+
+---

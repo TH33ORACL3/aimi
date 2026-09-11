@@ -99,6 +99,29 @@ class ProviderModelsCommandTests(unittest.TestCase):
             self.assertFalse(args.include_removed)
             connection.close()
 
+    def test_factory_droid_pi_alias_and_fragment(self) -> None:
+        self.assertEqual(AIMI.PI_ALIAS.get("factory"), "droid")
+        schema = (ROOT / "schema_v2.sql").read_text()
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            connection = sqlite3.connect(Path(temporary) / "fixture.db")
+            connection.row_factory = sqlite3.Row
+            connection.executescript(schema)
+            connection.execute(
+                "INSERT INTO providers(provider_id,display_name,official_models_endpoint,base_url,api_style,auth_env_var,pricing_policy,free_definition) VALUES(?,?,?,?,?,?,?,?)",
+                ("factory", "Factory Droid", "https://docs.factory.ai/models.md", "https://api.factory.ai", "droid-sdk", "FACTORY_API_KEY", "subscription", "Requires official pricing evidence"),
+            )
+            connection.execute(
+                "INSERT INTO provider_models_v2(provider_id,model_identifier,display_name,endpoint_first_seen_at,endpoint_last_seen_at,context_window_tokens,max_output_tokens,reasoning) VALUES(?,?,?,?,?,?,?,?)",
+                ("factory", "gpt-5.6-luna", "GPT-5.6 Luna", "2026-09-05T00:00:00Z", "2026-09-09T00:00:00Z", 128000, 16384, 1),
+            )
+            fragment = AIMI.pi_provider_fragment(connection, "factory", "gpt-5.6-luna")
+            self.assertEqual(fragment["name"], "Factory Droid")
+            self.assertEqual(fragment["api"], "droid-sdk")
+            self.assertEqual(fragment["apiKey"], "$FACTORY_API_KEY")
+            self.assertEqual(fragment["models"][0]["id"], "gpt-5.6-luna")
+            self.assertTrue(fragment["models"][0]["reasoning"])
+            connection.close()
+
 
 if __name__ == "__main__":
     unittest.main()

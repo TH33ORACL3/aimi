@@ -50,8 +50,9 @@ PROVIDER_FACTS={
  'huggingface':('Hugging Face','https://huggingface.co/api/models','https://router.huggingface.co/v1','openai-completions','HF_TOKEN'),
  'bedrock':('Amazon Bedrock','https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html','https://bedrock-runtime.{region}.amazonaws.com','aws-bedrock',None),
  'cline':('Cline','https://api.cline.bot/api/v1/ai/cline/recommended-models','https://api.cline.bot/api/v1','openai-completions','CLINE_API_KEY'),
+ 'factory':('Factory Droid','https://docs.factory.ai/models.md','https://api.factory.ai','droid-sdk','FACTORY_API_KEY'),
 }
-ALIASES={'opencode':'opencode-zen','nvidia':'nvidia-nim','clinepass':'cline'}
+ALIASES={'opencode':'opencode-zen','nvidia':'nvidia-nim','clinepass':'cline','droid':'factory'}
 
 HARNESS_KNOWN={
  'pi':('Pi CLI','CLI Agent','pi',Path.home()/'.pi/agent/settings.json',Path.home()/'.pi/agent/models.json'),
@@ -624,7 +625,7 @@ def scan_omp(conn):
                     add_available(conn,inst,apid,model,ep,None,mname.group(1) if mname else name.group(1) if name else None,meta,register=False)
 
 def scan_credentials(conn):
-    mapping={'OPENAI_API_KEY':'openai','ANTHROPIC_API_KEY':'anthropic','GEMINI_API_KEY':'gemini','MISTRAL_API_KEY':'mistral','DEEPSEEK_API_KEY':'deepseek','NVIDIA_API_KEY':'nvidia-nim','AIMI_OPENROUTER_API_KEY':'openrouter','OPENCODE_API_KEY':'opencode-zen','HF_TOKEN':'huggingface','GROQ_API_KEY':'groq','XAI_API_KEY':'xai','CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS':'cloudflare-ai','CLINE_API_KEY':'cline'}
+    mapping={'OPENAI_API_KEY':'openai','ANTHROPIC_API_KEY':'anthropic','GEMINI_API_KEY':'gemini','MISTRAL_API_KEY':'mistral','DEEPSEEK_API_KEY':'deepseek','NVIDIA_API_KEY':'nvidia-nim','AIMI_OPENROUTER_API_KEY':'openrouter','OPENCODE_API_KEY':'opencode-zen','HF_TOKEN':'huggingface','GROQ_API_KEY':'groq','XAI_API_KEY':'xai','CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS':'cloudflare-ai','CLINE_API_KEY':'cline','FACTORY_API_KEY':'factory'}
     for env,pid in mapping.items():
         pid=ensure_provider(conn,pid)
         conn.execute("INSERT OR REPLACE INTO credential_inventory(provider_id,machine_id,env_var_name,present,source_type,last_checked_at,notes) VALUES(?,?,?,?,?,?,?)",

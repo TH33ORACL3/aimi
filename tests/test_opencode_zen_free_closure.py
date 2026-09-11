@@ -212,6 +212,43 @@ class OpenCodeZenFreeClosureTests(unittest.TestCase):
         )
         connection.close()
 
+    def test_health_connection_waits_for_sqlite_locks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            old_db = health.DB
+            health.DB = Path(temporary) / 'health.db'
+            try:
+                connection = health.connect()
+                self.assertEqual(
+                    connection.execute('PRAGMA busy_timeout').fetchone()[0],
+                    30000,
+                )
+                self.assertEqual(
+                    connection.execute('PRAGMA foreign_keys').fetchone()[0],
+                    1,
+                )
+                connection.close()
+            finally:
+                health.DB = old_db
+
+    def test_retry_locked_retries_transient_database_lock(self) -> None:
+        connection = sqlite3.connect(':memory:')
+        calls: list[int] = []
+
+        def operation() -> str:
+            calls.append(1)
+            if len(calls) < 3:
+                raise sqlite3.OperationalError('database is locked')
+            return 'ok'
+
+        with patch.object(health.time, 'sleep') as sleeper:
+            self.assertEqual(
+                health.retry_locked(operation, rollback=connection.rollback),
+                'ok',
+            )
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeper.call_count, 2)
+        connection.close()
+
     def test_monitor_does_not_reopen_closed_route(self) -> None:
         connection = self.make_connection()
         provider_model_id = connection.execute(
@@ -284,7 +321,9 @@ class OpenCodeZenFreeClosureTests(unittest.TestCase):
         body = notifier.format_free_window_closure_notification(
             [row], {('opencode-zen', 'deepseek-v4-flash-free')}
         )
+        self.assertIn('⏰ **FREE ACCESS ENDED:', body)
         self.assertIn('Free model access ended (1)', body)
+        self.assertIn('⏰ FREE ACCESS ENDED', body)
         self.assertIn('Still enabled locally.', body)
         body_without_impact = notifier.format_free_window_closure_notification(
             [row], {('opencode', 'deepseek-v4-flash-free')}

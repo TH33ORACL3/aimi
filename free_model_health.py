@@ -20,7 +20,7 @@ load_aimi_credentials()
 ROOT=Path(__file__).resolve().parent
 DB=ROOT/'aimi.db'
 MIGRATION=ROOT/'free_model_health.sql'
-VERSION='free-model-health/1.1'
+VERSION='free-model-health/1.2'
 PROMPT='Reply with exactly OK'
 OP_ZEN_PROMOTION_ENDED_RE = re.compile(
     r'\bfree\s+(?:promotion|window|tier|access)\s+(?:has\s+)?'
@@ -29,9 +29,33 @@ OP_ZEN_PROMOTION_ENDED_RE = re.compile(
 )
 
 
+SQLITE_BUSY_RETRIES=3
+SQLITE_BUSY_BACKOFFS=(0.2,1.0,3.0)
+
+
 def now():return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 def connect():
- c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');return c
+ c=sqlite3.connect(DB,timeout=30)
+ c.row_factory=sqlite3.Row
+ c.execute('PRAGMA busy_timeout=30000')
+ c.execute('PRAGMA foreign_keys=ON')
+ return c
+
+
+def is_locked(exc):
+ return isinstance(exc,sqlite3.OperationalError) and any(
+  token in str(exc).lower() for token in ('database is locked','database table is locked','database schema is locked','busy')
+ )
+
+
+def retry_locked(operation,attempts=SQLITE_BUSY_RETRIES,rollback=None):
+ for attempt in range(max(1,attempts)):
+  try:return operation()
+  except sqlite3.OperationalError as exc:
+   if not is_locked(exc) or attempt+1>=attempts:raise
+   if rollback is not None:rollback()
+   time.sleep(SQLITE_BUSY_BACKOFFS[min(attempt,len(SQLITE_BUSY_BACKOFFS)-1)])
+ raise RuntimeError('SQLite retry loop exhausted')
 
 def targets(c,provider=None,only_failures=False,exclude_provider=None):
  q="""SELECT f.provider_model_id,f.provider_id,f.model_identifier,f.display_name,f.offer_type,f.offer_verified_at
@@ -117,7 +141,7 @@ def ensure_promotion_ended_evidence(c, result: dict) -> tuple[int, int]:
         """INSERT OR IGNORE INTO evidence_captures(
              evidence_source_id,retrieved_at,content_sha256,archived_path,
              http_status,extraction_method,extractor_version,notes)
-           VALUES(?,?,?,?,?,'runtime_probe','free-model-health/1.1',?)""",
+           VALUES(?,?,?,?,?,'runtime_probe','free-model-health/1.2',?)""",
         (source_id, result['tested_at'], hashlib.sha256(raw).hexdigest(),
          str(archive.relative_to(ROOT)), result.get('http_status'),
          'Sanitised provider error captured from an authenticated runtime probe.'),
@@ -203,7 +227,7 @@ def probe(target,config,timeout):
  except Exception as e:result.update(status='network_error',error_category=type(e).__name__,error_message=' '.join(str(e).split())[:300])
  result['latency_ms']=round((time.perf_counter()-started)*1000);return result
 
-def record(c,results,retention_days):
+def _record_once(c,results,retention_days):
  reconcile_active_temporary_free_windows(c, detected_at=now())
  c.executescript(MIGRATION.read_text())
  previous={x['provider_model_id']:x['last_status'] for x in c.execute('SELECT provider_model_id,last_status FROM free_model_probe_status')}
@@ -237,9 +261,23 @@ def record(c,results,retention_days):
   (r['provider_model_id'],day,r['tested_at'],r['tested_at'],1 if ok else 0,0 if ok else 1,r['status'],r['latency_ms'],r['latency_ms'],lat))
  c.execute("DELETE FROM free_model_probe_daily WHERE test_date < date('now',?)",(f'-{retention_days} days',));c.commit();return transitions
 
+
+def record(c,results,retention_days):
+ def operation():
+  return _record_once(c,results,retention_days)
+ operation.connection=c
+ return retry_locked(operation,rollback=c.rollback)
+
+
 def main():
  p=argparse.ArgumentParser();p.add_argument('--provider');p.add_argument('--exclude-provider');p.add_argument('--only-failures',action='store_true');p.add_argument('--workers',type=int,default=4);p.add_argument('--timeout',type=int,default=45);p.add_argument('--openrouter-start-interval',type=float,default=3.2);p.add_argument('--retention-days',type=int,default=30);p.add_argument('--output',type=Path);p.add_argument('--quiet',action='store_true');a=p.parse_args()
- c=connect();reconcile_active_temporary_free_windows(c, detected_at=now());c.executescript(MIGRATION.read_text());items=targets(c,a.provider,a.only_failures,a.exclude_provider);configs=provider_config(c)
+ c=connect()
+ def prepare():
+  reconcile_active_temporary_free_windows(c, detected_at=now())
+  c.executescript(MIGRATION.read_text())
+ prepare.connection=c
+ retry_locked(prepare,rollback=c.rollback)
+ items=targets(c,a.provider,a.only_failures,a.exclude_provider);configs=provider_config(c)
  if not items:raise SystemExit('No currently verified free routes matched; no requests sent')
  with concurrent.futures.ThreadPoolExecutor(max_workers=max(1,min(a.workers,8))) as pool:
   futures=[]

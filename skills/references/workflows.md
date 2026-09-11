@@ -247,10 +247,11 @@ Unknown end dates must be reported as “duration unpublished,” not “free fo
 "$catalogue" cron-runs
 ```
 
-- The consolidated 15-minute Hermes job is `f8ff78fe2fb2`, named `model-catalogue-discovery-notifier`.
+- The consolidated 15-minute Hermes job is `762bf502788c`, named `model-release-discovery-desk`.
 - It polls the same 11 official model endpoints, including Cline's authenticated ClinePass catalogue, runs `monitor_endpoints.py`, promotes endpoint-only candidates with `ingest_endpoint_candidates.py`, and sends Telegram for newly observed `model_added` or `model_removed` routes.
-- It uses a durable pending outbox and `hermes send --json`; the endpoint watermark advances only after a successful delivery acknowledgement. Failed sends remain pending for the next run, with the outer Hermes Telegram delivery retained as a fallback.
-- It is silent when there are no new route or failure-transition notifications. Provider failures alert only on transition/change and recovery, not every repeated poll.
+- The shared model-news gate keeps endpoint observations separate from public news: five or more additions from one provider run are labelled bulk catalogue synchronisation and never enter the editorial queue; origin-provider additions need verified official same-day release evidence; non-bulk additions from the explicit aggregator/gateway allowlist remain route-availability candidates.
+- It uses a durable multi-part pending outbox and `hermes send --json`; the endpoint watermark advances only after every part receives a successful delivery acknowledgement. Failed sends retain the next part for the next run, with the outer Hermes Telegram delivery retained as a fallback.
+- It is silent when there are no new route or failure-transition notifications. Phone alerts use `🆕 ADDED`, `🗑️ REMOVED`, `⏰ FREE ACCESS ENDED`, and `🔄 RESYNC`; provider failures use explicit unavailable/recovered labels and alert only on transition/change, not every repeated poll.
 - A first-run watermark suppresses historical changes; future changes are deduplicated in `~/.hermes/cron/model-catalogue-discovery-notifier.json`.
 - Raw payload hashes are preserved, but alerts use normalized stable fields.
 - Endpoint observations and endpoint-first-seen events may be written automatically. Do not infer official release dates, pricing, capabilities, or free access from an endpoint listing.
@@ -298,9 +299,9 @@ The public export must omit local installations, credentials, personal rankings,
 
 ## Model-release desk → sellable product linkage (2026-08-13)
 
-The release desk now ties each verified AI-model release to the AZ Labs product we sell. This is the standing standard for a major-lab release (Google, OpenAI, Anthropic, xAI).
+The release desk now ties each verified AI-model release to the AZ Labs product we sell. It only processes a route that passed the shared news-eligibility gate: verified official same-day release evidence or a non-bulk aggregator/gateway addition. This is the standing standard for a major-lab release (Google, OpenAI, Anthropic, xAI).
 
-Flow: AIMI endpoint poll → `endpoint_changes` → durable queue → `model_release_desk.py process` → Pi editorial worker.
+Flow: AIMI endpoint poll → `endpoint_changes` → news-eligibility gate → durable queue → `model_release_desk.py process` → Pi editorial worker.
 
 Product linkage is resolved by `sellable_products_for()` in `model_release_desk.py`, which joins `subscription_model_access` → `subscription_products` via `provider_model_id` (provider + model identifier). It returns matching active products (slug, display name, vendor). The `work_input` carries each trigger item's `sellable_products` matches, and the `release_prompt` instructs Pi to lead the news article back to the matching sellable product.
 

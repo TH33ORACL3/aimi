@@ -69,38 +69,40 @@
     },
     {
       "check": "pi_enabled_models_exist_at_provider",
-      "passed": true,
-      "value": 0,
+      "passed": false,
+      "value": [
+        "openrouter/z-ai/glm-5.2:free"
+      ],
       "expected": 0
     },
     {
       "check": "endpoint_changes_reviewed",
       "passed": false,
-      "value": 5482,
+      "value": 13548,
       "expected": 0
     },
     {
       "check": "monitoring_targets_healthy",
-      "passed": true,
-      "value": 0,
-      "expected": 0
-    },
-    {
-      "check": "free_health_targets_still_free",
-      "passed": true,
-      "value": 0,
-      "expected": 0
-    },
-    {
-      "check": "active_free_routes_have_health_status",
       "passed": false,
       "value": 1,
       "expected": 0
     },
     {
+      "check": "free_health_targets_still_free",
+      "passed": false,
+      "value": 3,
+      "expected": 0
+    },
+    {
+      "check": "active_free_routes_have_health_status",
+      "passed": false,
+      "value": 2,
+      "expected": 0
+    },
+    {
       "check": "free_health_history_within_retention",
-      "passed": true,
-      "value": 0,
+      "passed": false,
+      "value": 125,
       "expected": 0
     },
     {
@@ -111,8 +113,8 @@
     },
     {
       "check": "referenced_snapshots_present",
-      "passed": true,
-      "value": 0,
+      "passed": false,
+      "value": 16676,
       "expected": 0
     },
     {
@@ -123,20 +125,20 @@
     }
   ],
   "metrics": {
-    "provider_routes": 1105,
-    "canonical_models": 890,
-    "active_free_routes": 174,
-    "verified_events": 1054,
-    "evidence_sources": 73,
-    "claims": 148,
-    "installed_harnesses": 12,
-    "pi_enabled_models": 24,
+    "provider_routes": 1219,
+    "canonical_models": 965,
+    "active_free_routes": 141,
+    "verified_events": 1146,
+    "evidence_sources": 82,
+    "claims": 155,
+    "installed_harnesses": 5,
+    "pi_enabled_models": 12,
     "pi_snapshot_order_differs": true,
-    "benchmark_scores": 419,
+    "benchmark_scores": 541,
     "deepswe_scored_models": 25,
-    "free_health_green": 52,
-    "free_health_orange": 2,
-    "free_health_red": 89,
-    "free_health_daily_rows": 1020
+    "free_health_green": 24,
+    "free_health_orange": 4,
+    "free_health_red": 90,
+    "free_health_daily_rows": 539
   }
 }

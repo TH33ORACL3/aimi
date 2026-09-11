@@ -85,9 +85,17 @@ class ModelDiscoveryNotifierTests(unittest.TestCase):
                       'paid' AS access_type,
                       'https://example.invalid/models' AS endpoint_url"""
         ).fetchone()
-        body = notifier.format_notification([row], [row], set())
+        body = notifier.format_notification(
+            [row], [row], {('openrouter', 'example/new-model')}
+        )
+        self.assertIn('🆕 **ADDED:', body)
         self.assertIn('New AI model routes discovered (1)', body)
+        self.assertIn('🗑️ **REMOVED:', body)
         self.assertIn('Model routes removed from their provider (1)', body)
+        self.assertIn('🆕 ADDED', body)
+        self.assertIn('🗑️ REMOVED', body)
+        self.assertIn('ACTION NEEDED', body)
+        self.assertLess(body.find('ACTION NEEDED'), body.find('**1. 🗑️ REMOVED'))
         self.assertIn('First seen:** 04 Aug 2026, 19:00:00 SAST', body)
         self.assertIn('Context window: 1,000 tokens', body)
         self.assertIn('Max input: Unknown', body)
@@ -127,6 +135,94 @@ class ModelDiscoveryNotifierTests(unittest.TestCase):
         self.assertEqual(queue['pending'][0]['endpoint_change_id'], 15)
         self.assertEqual(queue['pending'][0]['model_identifier'], 'example/new-model')
         self.assertEqual(queue['pending'][0]['attempts'], 0)
+        connection.close()
+
+    def test_bulk_origin_discovery_is_not_queued_for_editorial_news(self) -> None:
+        connection = sqlite3.connect(':memory:')
+        connection.row_factory = sqlite3.Row
+        rows = [
+            connection.execute(
+                """SELECT ? AS endpoint_change_id,
+                          77 AS monitoring_run_id,
+                          12 AS monitoring_run_added_count,
+                          'openai' AS provider_id,
+                          ? AS model_identifier,
+                          '2026-08-26T12:15:46+00:00' AS detected_at""",
+                (100 + position, f'legacy/model-{position}'),
+            ).fetchone()
+            for position in range(12)
+        ]
+
+        eligible, suppressed = notifier.filter_news_candidates(rows)
+
+        self.assertEqual(eligible, [])
+        self.assertEqual(len(suppressed), 12)
+        self.assertTrue(
+            all(
+                item['news_eligibility_reason'] == 'bulk_endpoint_sync'
+                for item in suppressed
+            )
+        )
+        self.assertEqual(notifier.enqueue_release_candidates(rows), 0)
+        self.assertFalse(self.release_queue_path.exists())
+        body = notifier.format_notification(rows, [], set(), suppressed=suppressed)
+        self.assertIn('🔄 **RESYNC:', body)
+        self.assertIn('Bulk model catalogue sync (12 routes; no editorial candidates)', body)
+        self.assertNotIn('legacy/model-0', body)
+        self.assertIn('withheld from the website/X news queue', body)
+        connection.close()
+
+    def test_same_day_official_release_overrides_bulk_suppression(self) -> None:
+        connection = sqlite3.connect(':memory:')
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """SELECT 200 AS endpoint_change_id,
+                      88 AS monitoring_run_id,
+                      12 AS monitoring_run_added_count,
+                      'openai' AS provider_id,
+                      'new/model' AS model_identifier,
+                      '2026-08-26T12:15:46+00:00' AS detected_at,
+                      1 AS same_day_official_release,
+                      'OpenAI: New Model' AS model_name,
+                      'https://example.invalid/models' AS endpoint_url"""
+        ).fetchone()
+
+        eligible, suppressed = notifier.filter_news_candidates([row])
+
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(eligible[0]['news_eligibility_reason'], 'same_day_official_release')
+        self.assertEqual(suppressed, [])
+        self.assertEqual(notifier.enqueue_release_candidates([row]), 1)
+        queue = json.loads(self.release_queue_path.read_text())
+        self.assertEqual(
+            queue['pending'][0]['news_eligibility_reason'],
+            'same_day_official_release',
+        )
+        connection.close()
+
+    def test_single_origin_endpoint_observation_is_not_editorial_news(self) -> None:
+        connection = sqlite3.connect(':memory:')
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """SELECT 210 AS endpoint_change_id,
+                      89 AS monitoring_run_id,
+                      1 AS monitoring_run_added_count,
+                      'openai' AS provider_id,
+                      'old/model' AS model_identifier,
+                      '2026-08-26T12:15:46+00:00' AS detected_at"""
+        ).fetchone()
+
+        eligible, suppressed = notifier.filter_news_candidates([row])
+
+        self.assertEqual(eligible, [])
+        self.assertEqual(
+            suppressed[0]['news_eligibility_reason'],
+            'endpoint_observation_without_release',
+        )
+        body = notifier.format_notification([row], [], set(), suppressed=suppressed)
+        self.assertIn('📡 **ROUTE OBSERVATION:', body)
+        self.assertNotIn('🆕 **ADDED:', body)
+        self.assertNotIn('Bulk model catalogue sync', body)
         connection.close()
 
     def test_failed_delivery_keeps_pending_and_does_not_advance_watermark(self) -> None:
@@ -221,6 +317,50 @@ class ModelDiscoveryNotifierTests(unittest.TestCase):
         bounded = notifier.bound_message('x' * (notifier.MAX_MESSAGE_CHARS + 500))
         self.assertLessEqual(len(bounded), notifier.MAX_MESSAGE_CHARS + 80)
         self.assertIn('message truncated', bounded)
+
+    def test_split_message_preserves_content_and_part_limit(self) -> None:
+        text = '\n\n'.join(f'Route {position}: ' + ('x' * 45) for position in range(12))
+        parts = notifier.split_message(text, limit=160)
+
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= 160 for part in parts))
+        for position in range(12):
+            self.assertIn(f'Route {position}:', '\n'.join(parts))
+        self.assertIn('part 1/', parts[0])
+        self.assertNotIn(r'\n', '\n'.join(parts))
+
+    def test_multipart_pending_resumes_at_failed_part(self) -> None:
+        state = notifier.initial_state(10)
+        state['pending_notification'] = notifier.pending_record(
+            ['part one', 'part two', 'part three'], 15, 'discovery'
+        )
+        notifier.save_state(state)
+        calls: list[str] = []
+
+        def sender(body: str) -> dict:
+            calls.append(body)
+            if len(calls) == 2:
+                raise notifier.DeliveryError('offline')
+            return {'message_id': str(len(calls))}
+
+        with patch.object(notifier, 'deliver_notification', side_effect=sender):
+            with self.assertRaises(notifier.DeliveryError):
+                notifier.deliver_pending(state)
+
+        saved_after_failure = json.loads(self.state_path.read_text())
+        self.assertEqual(saved_after_failure['pending_notification']['part_index'], 1)
+        self.assertEqual(saved_after_failure['pending_notification']['body'], 'part two')
+        self.assertEqual(saved_after_failure['last_change_id'], 10)
+
+        with patch.object(notifier, 'deliver_notification', return_value={'message_id': 'retry'}) as retry:
+            notifier.deliver_pending(state)
+
+        retry.assert_any_call('part two')
+        retry.assert_any_call('part three')
+        saved = json.loads(self.state_path.read_text())
+        self.assertEqual(saved['last_change_id'], 15)
+        self.assertIsNone(saved['pending_notification'])
+        self.assertEqual(saved['last_delivery']['part_count'], 3)
 
 
 if __name__ == '__main__':

@@ -11,7 +11,10 @@ ROOT=Path(__file__).resolve().parent; HOME=Path.home()
 # AIMI_DB lets an agent point the CLI at a copy, an export, or a test database
 # without editing the project. Unset means the private catalogue next to this file.
 DB=Path(os.environ['AIMI_DB']).expanduser() if os.environ.get('AIMI_DB') else ROOT/'aimi.db'
-PI_ALIAS={'opencode-zen':'opencode','nvidia-nim':'nvidia','cloudflare-ai':'cloudflare-workers-ai'}
+# Keep provider IDs exact where Pi has distinct configured blocks. The legacy
+# `opencode` alias remains available as its own config entry, but OpenCode Zen
+# must not be silently rewritten to it.
+PI_ALIAS={'nvidia-nim':'nvidia','cloudflare-ai':'cloudflare-workers-ai','factory':'droid'}
 
 def refresh_local_harnesses():
     scanner=ROOT/'scan_local_harnesses.py'
@@ -673,8 +676,8 @@ def pi_fragment(c,a):print(json.dumps({'providers':{a.provider:pi_provider_fragm
 def write_pi_settings(path,d):
  backup=path.with_name(path.name+'.bak.aimi-'+datetime.now().strftime('%Y%m%d-%H%M%S'));shutil.copy2(path,backup);tmp=path.with_suffix('.json.tmp');tmp.write_text(json.dumps(d,indent=2)+'\n');json.loads(tmp.read_text());tmp.replace(path);return backup
 def register_pi_model(c,provider,model,apply):
- path=HOME/'.pi/agent/models.json';d=json.loads(path.read_text()) if path.exists() else {'providers':{}};fragment=pi_provider_fragment(c,provider,model);existing=d.setdefault('providers',{}).get(provider,{})
- models=[x for x in existing.get('models',[]) if x.get('id')!=model]+fragment['models'];merged={**fragment,**existing,'models':models};d['providers'][provider]=merged
+ path=HOME/'.pi/agent/models.json';d=json.loads(path.read_text()) if path.exists() else {'providers':{}};fragment=pi_provider_fragment(c,provider,model);config_provider=PI_ALIAS.get(provider,provider);existing=d.setdefault('providers',{}).get(config_provider,{})
+ models=[x for x in existing.get('models',[]) if x.get('id')!=model]+fragment['models'];merged={**fragment,**existing,'models':models};d['providers'][config_provider]=merged
  out={'provider':provider,'model':model,'already_registered':any(x.get('id')==model for x in existing.get('models',[])),'apply':apply}
  if apply:out['backup']=str(write_pi_settings(path,d)) if path.exists() else None;path.write_text(json.dumps(d,indent=2)+'\n') if not path.exists() else None
  return out

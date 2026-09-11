@@ -4,13 +4,15 @@
 The AIMI endpoint monitor is the source of truth for polling and raw evidence.
 This wrapper runs that monitor, promotes endpoint-only candidates into the
 catalogue's route/event tables, and sends Telegram notifications for added or
-removed provider routes and provider-confirmed free-window closures.
+removed provider routes and provider-confirmed free-window closures. A shared
+news gate keeps bulk synchronisations and unverified origin-provider additions
+out of the website/X editorial queue.
 
 Delivery is deliberately at-least-once. A durable pending outbox is written
-before sending and the endpoint-change watermark advances only after
-``hermes send --json`` succeeds. A crash in the small post-send persistence
-window may produce one duplicate alert, but a Telegram outage cannot silently
-lose a discovery or removal notification.
+before sending and the endpoint-change watermark advances only after every
+bounded Telegram part receives a successful ``hermes send --json`` response. A
+crash in the small post-send persistence window may produce one duplicate alert,
+but a Telegram outage cannot silently lose a discovery or removal notification.
 
 Provider failures are reported on transition/change and recovery, not on every
 poll. The watcher never infers release dates, pricing, capabilities, or free
@@ -33,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from model_news_eligibility import filter_news_candidates
+
 # Resolve the project from this file so the repository stays portable and no
 # personal home path is committed. The Hermes wrapper invokes this script by
 # absolute path, which keeps working under any checkout location.
@@ -43,7 +47,7 @@ INGEST = PROJECT / 'ingest_endpoint_candidates.py'
 STATE = Path.home() / '.hermes' / 'cron' / 'model-catalogue-discovery-notifier.json'
 LOCK = Path.home() / '.hermes' / 'cron' / 'model-catalogue-discovery-notifier.lock'
 RELEASE_QUEUE = Path.home() / '.hermes' / 'cron' / 'model-release-desk-queue.json'
-VERSION = 'model-catalogue-discovery-notifier/2.3'
+VERSION = 'model-catalogue-discovery-notifier/2.5'
 RELEASE_QUEUE_VERSION = 1
 HERMES_TARGET = os.environ.get('AIMI_TELEGRAM_TARGET', 'telegram:7104596722')
 HERMES_TIMEOUT_SECONDS = 60
@@ -253,20 +257,33 @@ def free_window_event_id_at_or_before(
 def run_aimi_script(path: Path) -> subprocess.CompletedProcess[str]:
     if not path.exists():
         raise RuntimeError(f'Missing AIMI script: {path}')
-    # Hermes starts jobs with a minimal environment. Source Aubrey's exported
-    # provider credentials without ever printing the sourced file or values.
-    command = (
-        "source ~/.zshrc >/dev/null 2>&1; "
-        f'exec {json.dumps(sys.executable)} {json.dumps(str(path))}'
-    )
+    # Hermes starts jobs with a minimal environment. Source the host's
+    # protected service env without ever printing the sourced file or values.
+    env_candidates = [
+        os.environ.get('AIMI_ENV_FILE', ''),
+        str(Path.home() / '.zshrc'),
+        str(Path.home() / '.env'),
+    ]
+    env_file = next((candidate for candidate in env_candidates if candidate and Path(candidate).is_file()), '')
+    source = f'if [ -r {json.dumps(env_file)} ]; then set -a; . {json.dumps(env_file)} >/dev/null 2>&1; set +a; fi; '
+    command = source + f'exec {json.dumps(sys.executable)} {json.dumps(str(path))}'
     environment = os.environ.copy()
     environment.setdefault(
         'PATH',
-        '/Users/TH33_ORACL3/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:'
-        '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+        os.pathsep.join(
+            str(candidate)
+            for candidate in (
+                Path.home() / '.local' / 'bin',
+                Path.home() / 'bin',
+                Path('/usr/local/bin'),
+                Path('/usr/bin'),
+                Path('/bin'),
+            )
+        ),
     )
+    shell = '/bin/zsh' if Path('/bin/zsh').exists() else '/bin/bash'
     return subprocess.run(
-        ['/bin/zsh', '-lc', command],
+        [shell, '-lc', command],
         cwd=PROJECT,
         env=environment,
         capture_output=True,
@@ -352,8 +369,16 @@ def send_via_hermes(
         environment = os.environ.copy()
         environment.setdefault(
             'PATH',
-            '/Users/TH33_ORACL3/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:'
-            '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+            os.pathsep.join(
+                str(candidate)
+                for candidate in (
+                    Path.home() / '.local' / 'bin',
+                    Path.home() / 'bin',
+                    Path('/usr/local/bin'),
+                    Path('/usr/bin'),
+                    Path('/bin'),
+                )
+            ),
         )
         invoke = runner or subprocess.run
         errors: list[str] = []
@@ -407,9 +432,13 @@ def route_rows(
         """
         SELECT
           ec.endpoint_change_id,
+          ec.monitoring_run_id,
           ec.provider_id,
           ec.model_identifier,
           ec.detected_at,
+          pm.provider_model_id,
+          pm.canonical_model_id,
+          pm.provider_created_at,
           COALESCE(cm.canonical_name, pm.display_name, ec.model_identifier) AS model_name,
           COALESCE(p.display_name, ec.provider_id) AS provider_name,
           pm.endpoint_first_seen_at,
@@ -522,8 +551,14 @@ DETAIL_LIMIT = 4
 
 PROVIDER_LABELS = {
     'cloudflare-ai': 'Cloudflare Workers AI',
+    'cline': 'Cline',
+    'deepseek': 'DeepSeek',
+    'gemini': 'Google Gemini',
+    'kilo': 'Kilo',
+    'mistral': 'Mistral',
     'nvidia-nim': 'NVIDIA NIM',
     'ollama-cloud': 'Ollama Cloud',
+    'openai': 'OpenAI',
     'opencode-go': 'OpenCode Go',
     'opencode-zen': 'OpenCode Zen',
     'openrouter': 'OpenRouter',
@@ -540,13 +575,28 @@ def route_value(route: sqlite3.Row, key: str, default=None):
         return default
 
 
-def enqueue_release_candidates(routes: list[sqlite3.Row]) -> int:
-    """Persist new route additions for the slower editorial release desk.
+def enqueue_release_candidates(
+    routes: list[sqlite3.Row],
+    *,
+    connection: sqlite3.Connection | None = None,
+    prefiltered: bool = False,
+) -> int:
+    """Persist only news-eligible additions for the editorial release desk.
 
-    Endpoint additions are candidates, not release claims. The Pi worker must
-    verify official evidence before publishing anything.
+    Endpoint additions are observations, not release claims. Bulk catalogue
+    synchronisations and origin-provider backfills stay out of the website/X
+    queue; the release desk independently re-checks legacy queue records.
     """
     if not routes:
+        return 0
+    if prefiltered:
+        eligible = [
+            route for route in routes
+            if route_value(route, 'news_eligible', False)
+        ]
+    else:
+        eligible, _suppressed = filter_news_candidates(routes, connection=connection)
+    if not eligible:
         return 0
     queue = load_release_queue()
     pending = queue['pending']
@@ -561,13 +611,24 @@ def enqueue_release_candidates(routes: list[sqlite3.Row]) -> int:
         if isinstance(item, dict) and item.get('endpoint_change_id') is not None
     )
     added_count = 0
-    for route in routes:
+    for route in eligible:
         change_id = int(route_value(route, 'endpoint_change_id', 0))
         if not change_id or change_id in known_ids:
             continue
         pending.append(
             {
                 'endpoint_change_id': change_id,
+                'monitoring_run_id': route_value(route, 'monitoring_run_id'),
+                'monitoring_run_added_count': route_value(route, 'monitoring_run_added_count'),
+                'provider_model_id': route_value(route, 'provider_model_id'),
+                'canonical_model_id': route_value(route, 'canonical_model_id'),
+                'news_eligibility_reason': route_value(
+                    route, 'news_eligibility_reason', 'aggregator_route_added'
+                ),
+                'same_day_official_release': route_value(
+                    route, 'same_day_official_release', False
+                ),
+                'discovery_group_size': route_value(route, 'discovery_group_size'),
                 'provider_id': str(route_value(route, 'provider_id', 'unknown')),
                 'provider_name': str(route_value(route, 'provider_name', 'unknown')),
                 'model_identifier': str(route_value(route, 'model_identifier', 'unknown')),
@@ -703,9 +764,9 @@ def format_route_card(route: sqlite3.Row, position: int, *, removed: bool, confi
     name = str(route_value(route, 'model_name', model))
     route_id = f'{provider}/{model}'
     endpoint = route_value(route, 'endpoint_url', 'Unknown')
-    marker = '⚠️' if removed else '🆕'
+    marker = '🗑️ REMOVED' if removed else '🆕 ADDED'
     lines = [
-        f'**{position}. {marker} {provider_label(route)}**',
+        f'**{position}. {marker} · {provider_label(route)}**',
         f'**Model:** {inline_code(name)}',
         f'**Route:** {inline_code(route_id)}',
         f'**Endpoint:** {inline_code(endpoint)}',
@@ -736,13 +797,14 @@ def format_route_card(route: sqlite3.Row, position: int, *, removed: bool, confi
     return lines
 
 
-def overflow(routes: list[sqlite3.Row], noun: str) -> list[str]:
+def overflow(routes: list[sqlite3.Row] | list[dict], noun: str) -> list[str]:
     extra = routes[DETAIL_LIMIT:]
     if not extra:
         return []
     by_provider: dict[str, int] = {}
     for route in extra:
-        by_provider[route['provider_id']] = by_provider.get(route['provider_id'], 0) + 1
+        provider = str(route_value(route, 'provider_id', 'unknown'))
+        by_provider[provider] = by_provider.get(provider, 0) + 1
     summary = ', '.join(f'{provider} {count}' for provider, count in sorted(by_provider.items()))
     return [f'...and {len(extra)} more {noun}(s): {summary}', '']
 
@@ -753,6 +815,57 @@ def bound_message(text: str) -> str:
     return text[: MAX_MESSAGE_CHARS - 80].rstrip() + '\n\n...message truncated; inspect AIMI endpoint_changes for the full list.'
 
 
+def _hard_split(text: str, limit: int) -> list[str]:
+    """Split one oversized paragraph without dropping its content."""
+    pieces: list[str] = []
+    remainder = text.strip()
+    while len(remainder) > limit:
+        newline = remainder.rfind('\n', 0, limit + 1)
+        space = remainder.rfind(' ', 0, limit + 1)
+        cut = max(newline, space)
+        if cut < 1:
+            cut = limit
+        pieces.append(remainder[:cut].rstrip())
+        remainder = remainder[cut:].lstrip()
+    if remainder:
+        pieces.append(remainder)
+    return pieces
+
+
+def split_message(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
+    """Split a notification into bounded logical parts instead of truncating it."""
+    value = str(text or '').strip()
+    if not value:
+        return []
+    if len(value) <= limit:
+        return [value]
+
+    # Reserve room for the part header so every delivered Telegram message
+    # remains under the platform limit, including large part numbers.
+    body_limit = max(1, limit - 80)
+    paragraphs = [paragraph.strip() for paragraph in value.split('\n\n') if paragraph.strip()]
+    chunks: list[str] = []
+    current = ''
+    for paragraph in paragraphs:
+        pieces = _hard_split(paragraph, body_limit) if len(paragraph) > body_limit else [paragraph]
+        for piece in pieces:
+            candidate = piece if not current else f'{current}\n\n{piece}'
+            if len(candidate) <= body_limit:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current)
+                current = piece
+    if current:
+        chunks.append(current)
+
+    total = len(chunks)
+    return [
+        f'📨 **AIMI model update · part {position}/{total}**\n\n{chunk}'
+        for position, chunk in enumerate(chunks, start=1)
+    ]
+
+
 def format_free_window_closure_notification(
     closures: list[sqlite3.Row],
     configured: set[tuple[str, str]],
@@ -761,8 +874,8 @@ def format_free_window_closure_notification(
     if not closures:
         return ''
     lines = [
-        f'Free model access ended ({len(closures)})',
-        '_AIMI runtime probe, local time_',
+        f'⏰ **FREE ACCESS ENDED: Free model access ended ({len(closures)})**',
+        '_AIMI runtime probe · local time_',
         '',
     ]
     for position, route in enumerate(closures[:DETAIL_LIMIT], start=1):
@@ -771,7 +884,7 @@ def format_free_window_closure_notification(
         name = str(route_value(route, 'model_name', model))
         lines.extend(
             [
-                f'{position}. {provider_label(route)}',
+                f'{position}. ⏰ FREE ACCESS ENDED · {provider_label(route)}',
                 f'Model: {inline_code(name)}',
                 f'Route: {inline_code(f"{provider}/{model}")}',
                 f'Closed: {format_local_time(route_value(route, "detected_at"))}',
@@ -785,27 +898,100 @@ def format_free_window_closure_notification(
         lines.append(f'...and {len(closures) - DETAIL_LIMIT} more closure(s).')
         lines.append('')
     lines.append('The route may still be available through paid or subscription access.')
-    return bound_message('\n'.join(lines))
+    return '\n'.join(lines)
+
+
+def route_change_id(route: sqlite3.Row | dict) -> int | None:
+    value = route_value(route, 'endpoint_change_id')
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def provider_summary(routes: list[sqlite3.Row] | list[dict]) -> str:
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for route in routes:
+        provider = str(route_value(route, 'provider_id', 'unknown'))
+        counts[provider] = counts.get(provider, 0) + 1
+        labels[provider] = provider_label(route)
+    return ', '.join(
+        f'{labels[provider]} {counts[provider]}'
+        for provider in sorted(counts)
+    )
+
+
+def format_suppressed_summary(suppressed: list[sqlite3.Row] | list[dict]) -> list[str]:
+    """Explain withheld additions without presenting them as new releases."""
+    grouped: dict[str, list[sqlite3.Row] | list[dict]] = {}
+    for route in suppressed:
+        reason = str(route_value(route, 'news_eligibility_reason', 'suppressed'))
+        grouped.setdefault(reason, []).append(route)
+
+    lines: list[str] = []
+    reason_order = ('bulk_endpoint_sync', 'endpoint_observation_without_release')
+    ordered_reasons = [reason for reason in reason_order if reason in grouped]
+    ordered_reasons.extend(reason for reason in grouped if reason not in ordered_reasons)
+    for reason in ordered_reasons:
+        routes = grouped[reason]
+        total = len(routes)
+        providers = provider_summary(routes)
+        if lines:
+            lines.append('')
+        if reason == 'bulk_endpoint_sync':
+            lines.extend(
+                [
+                    f'🔄 **RESYNC: Bulk model catalogue sync ({total} routes; no editorial candidates)**',
+                    f'Provider(s): {providers}',
+                    'Existing provider routes were re-listed after a catalogue refresh. These are not new model releases.',
+                    '',
+                ]
+            )
+            continue
+        if reason == 'endpoint_observation_without_release':
+            heading = f'📡 **ROUTE OBSERVATION: Endpoint-only additions ({total})**'
+            explanation = 'These routes were observed, but no verified release evidence was attached.'
+        else:
+            heading = f'ℹ️ **ROUTES WITHHELD: {reason.replace("_", " ").capitalize()} ({total})**'
+            explanation = 'These routes remain technical observations, not public release claims.'
+        lines.extend([heading, f'Provider(s): {providers}', explanation, ''])
+        for position, route in enumerate(routes[:DETAIL_LIMIT], start=1):
+            provider = str(route_value(route, 'provider_id', 'unknown'))
+            model = str(route_value(route, 'model_identifier', 'unknown'))
+            lines.append(f'• {inline_code(f"{provider}/{model}")}')
+        lines.extend(overflow(routes, 'observation'))
+    return lines
 
 
 def format_notification(
     added: list[sqlite3.Row],
     removed: list[sqlite3.Row],
     configured: set[tuple[str, str]],
+    suppressed: list[sqlite3.Row] | list[dict] | None = None,
 ) -> str:
     lines: list[str] = []
+    suppressed = suppressed or []
+    suppressed_ids = {
+        change_id for change_id in (route_change_id(route) for route in suppressed)
+        if change_id is not None
+    }
+    visible_added = [
+        route for route in added
+        if route_change_id(route) not in suppressed_ids
+    ]
 
-    if added:
+    if visible_added:
         lines.extend(
             [
-                f'🆕 **New AI model routes discovered ({len(added)})**',
+                f'🆕 **ADDED: New AI model routes discovered ({len(visible_added)})**',
                 '_AIMI endpoint monitor · local time_',
                 '',
             ]
         )
-        for position, route in enumerate(added[:DETAIL_LIMIT], start=1):
+        for position, route in enumerate(visible_added[:DETAIL_LIMIT], start=1):
             lines.extend(format_route_card(route, position, removed=False, configured=configured))
-        lines.extend(overflow(added, 'addition'))
+        lines.extend(overflow(visible_added, 'addition'))
 
     if removed:
         # A provider withdrawing a whole family produces a long list. Show the
@@ -817,27 +1003,49 @@ def format_notification(
             lines.append('')
         lines.extend(
             [
-                f'⚠️ **Model routes removed from their provider ({len(removed)})**',
+                f'🗑️ **REMOVED: Model routes removed from their provider ({len(removed)})**',
                 '_AIMI endpoint monitor · local time_',
                 '',
             ]
         )
+        if affected:
+            affected_routes = ', '.join(
+                inline_code(
+                    f"{route_value(route, 'provider_id', 'unknown')}/"
+                    f"{route_value(route, 'model_identifier', 'unknown')}"
+                )
+                for route in affected
+            )
+            lines.extend(
+                [
+                    f'🚨 **ACTION NEEDED: {len(affected)} removed route(s) are still enabled locally and may now fail.**',
+                    f'Route(s): {affected_routes}',
+                    'Review the local harness configuration before replacing or removing the route.',
+                    '',
+                ]
+            )
         for position, route in enumerate(ordered[:DETAIL_LIMIT], start=1):
             lines.extend(format_route_card(route, position, removed=True, configured=configured))
         lines.extend(overflow(ordered, 'removal'))
-        if affected:
-            lines.append(
-                f'🚨 **{len(affected)} removed route(s) are still enabled locally and may now fail.**'
-            )
-            lines.append('')
 
+    if suppressed:
+        if lines:
+            lines.append('')
+        lines.extend(format_suppressed_summary(suppressed))
+        lines.extend(
+            [
+                f'ℹ️ **{len(suppressed)} route(s) withheld from the website/X news queue.**',
+                '_Bulk synchronisations and endpoint-only observations are not public release news._',
+                '',
+            ]
+        )
     lines.extend(
         [
             'ℹ️ _Endpoint observation only. AIMI has not treated this as an official release or retirement date._',
             '_Pricing, capabilities, and free status remain evidence-dependent._',
         ]
     )
-    return bound_message('\n'.join(lines))
+    return '\n'.join(lines)
 
 
 def failure_snapshot(results: list[dict] | None) -> dict[str, str]:
@@ -882,17 +1090,17 @@ def format_failure_transitions(
 ) -> str:
     if not new_failures and not recovered:
         return ''
-    lines = ['AIMI model endpoint monitor status changed:', '']
+    lines = ['⚠️ **PROVIDER STATUS CHANGED**', '']
     for provider, error in new_failures:
-        lines.append(f'• {provider} failed: {error}')
+        lines.append(f'• ⚠️ **PROVIDER UNAVAILABLE:** {provider} · {safe_error(error)}')
     for provider in recovered:
-        lines.append(f'• {provider} recovered')
+        lines.append(f'• ✅ **PROVIDER RECOVERED:** {provider}')
     return '\n'.join(lines)
 
 
 def format_hard_failure(error: str) -> str:
     return bound_message(
-        'AIMI model discovery monitor failed:\n\n'
+        '⚠️ **PROVIDER FAILURE: AIMI discovery monitor failed**\n\n'
         f'• {safe_error(error)}\n\n'
         'The pending state will be retried on the next scheduled run.'
     )
@@ -901,20 +1109,31 @@ def format_hard_failure(error: str) -> str:
 def format_hard_recovery(previous_error: str | None) -> str:
     if not previous_error:
         return ''
-    return 'AIMI model discovery monitor recovered after a watcher failure:\n\n' f'• {safe_error(previous_error)}'
+    return '✅ **AIMI discovery monitor recovered**\n\n' f'• Previous failure: {safe_error(previous_error)}'
 
 
 def pending_record(
-    body: str,
+    body: str | list[str] | tuple[str, ...],
     up_to_change_id: int,
     kind: str,
     up_to_free_window_event_id: int | None = None,
 ) -> dict:
-    digest = hashlib.sha256(body.encode('utf-8')).hexdigest()[:16]
+    raw_parts = [body] if isinstance(body, str) else list(body)
+    parts: list[str] = []
+    for part in raw_parts:
+        parts.extend(split_message(str(part)))
+    if not parts:
+        raise ValueError('A pending notification must contain at least one message part')
+    digest = hashlib.sha256('\n\n'.join(parts).encode('utf-8')).hexdigest()[:16]
     return {
         'id': f'{kind}-{up_to_change_id}-{digest}',
         'kind': kind,
-        'body': body,
+        # `body` remains the current part for compatibility with existing
+        # state readers. `parts` and `part_index` make follow-up delivery
+        # restartable without advancing the endpoint watermark early.
+        'body': parts[0],
+        'parts': parts,
+        'part_index': 0,
         'up_to_change_id': int(up_to_change_id),
         'up_to_free_window_event_id': (
             int(up_to_free_window_event_id)
@@ -927,21 +1146,58 @@ def pending_record(
     }
 
 
+def pending_parts(pending: dict) -> list[str]:
+    parts = pending.get('parts')
+    if isinstance(parts, list) and parts:
+        return [str(part) for part in parts]
+    body = pending.get('body')
+    return split_message(str(body)) if body else []
+
+
 def deliver_pending(state: dict) -> dict | None:
-    """Retry one durable notification; only then advance its watermark."""
+    """Deliver every pending part before advancing its durable watermark."""
     pending = state.get('pending_notification')
     if not pending:
         return None
+    parts = pending_parts(pending)
+    if not parts:
+        raise DeliveryError('Pending notification has no message parts')
+    pending['parts'] = parts
     try:
-        result = deliver_notification(str(pending['body']))
-    except Exception as exc:
-        pending['attempts'] = int(pending.get('attempts') or 0) + 1
-        pending['last_attempt_at'] = now()
-        pending['last_error'] = safe_error(exc)
-        save_state(state)
-        if isinstance(exc, DeliveryError):
-            raise
-        raise DeliveryError(safe_error(exc)) from exc
+        part_index = int(pending.get('part_index') or 0)
+    except (TypeError, ValueError) as exc:
+        raise DeliveryError('Pending notification has an invalid part index') from exc
+    if part_index < 0 or part_index >= len(parts):
+        raise DeliveryError('Pending notification part index is out of range')
+
+    message_ids: list[str] = []
+    result: dict = {}
+    while part_index < len(parts):
+        body = parts[part_index]
+        pending['body'] = body
+        pending['part_index'] = part_index
+        try:
+            result = deliver_notification(body) or {}
+        except Exception as exc:
+            pending['attempts'] = int(pending.get('attempts') or 0) + 1
+            pending['last_attempt_at'] = now()
+            pending['last_error'] = safe_error(exc)
+            save_state(state)
+            if isinstance(exc, DeliveryError):
+                raise
+            raise DeliveryError(safe_error(exc)) from exc
+
+        message_id = result.get('message_id')
+        if message_id is not None:
+            message_ids.append(str(message_id))
+        part_index += 1
+        pending['part_index'] = part_index
+        # Persist progress after every accepted part. A crash between the
+        # Hermes acknowledgement and this write can duplicate one part, but
+        # can never skip an undelivered part or advance the watermark early.
+        if part_index < len(parts):
+            pending['body'] = parts[part_index]
+            save_state(state)
 
     state['pending_notification'] = None
     state['last_change_id'] = max(
@@ -953,18 +1209,22 @@ def deliver_pending(state: dict) -> dict | None:
             int(state.get('last_free_window_event_id') or 0),
             int(pending['up_to_free_window_event_id']),
         )
-    state['last_delivery'] = {
+    delivery = {
         'notification_id': pending.get('id'),
         'kind': pending.get('kind'),
-        **(result or {}),
+        'part_count': len(parts),
+        **result,
     }
+    if message_ids:
+        delivery['message_ids'] = message_ids
+    state['last_delivery'] = delivery
     save_state(state)
-    return result or {}
+    return result
 
 
 def queue_and_deliver(
     state: dict,
-    body: str,
+    body: str | list[str] | tuple[str, ...],
     up_to_change_id: int,
     kind: str,
     up_to_free_window_event_id: int | None = None,
@@ -1099,12 +1359,16 @@ def run_locked() -> int:
         removed = route_rows(connection, last_change_id, 'model_removed')
         closures = free_window_closure_rows(connection, last_free_window_event_id)
         configured = configured_models(connection)
+        eligible_added, suppressed_added = filter_news_candidates(
+            added,
+            connection=connection,
+        )
         connection.close()
     except Exception as exc:
         return handle_hard_failure(state, last_change_id, exc)
 
     try:
-        enqueue_release_candidates(added)
+        enqueue_release_candidates(eligible_added, prefiltered=True)
     except Exception as exc:
         return handle_hard_failure(state, last_change_id, exc)
 
@@ -1123,7 +1387,14 @@ def run_locked() -> int:
 
     message_parts: list[str] = []
     if added or removed:
-        message_parts.append(format_notification(added, removed, configured))
+        message_parts.append(
+            format_notification(
+                added,
+                removed,
+                configured,
+                suppressed=suppressed_added,
+            )
+        )
     if closures:
         message_parts.append(format_free_window_closure_notification(closures, configured))
     failure_text = format_failure_transitions(new_failures, recovered_failures)
@@ -1134,7 +1405,7 @@ def run_locked() -> int:
         message_parts.append(bound_message(hard_recovery))
 
     if message_parts:
-        body = bound_message('\n\n'.join(message_parts))
+        bodies = split_message('\n\n'.join(message_parts))
         if added or removed:
             kind = 'discovery'
         elif closures:
@@ -1144,7 +1415,7 @@ def run_locked() -> int:
         try:
             queue_and_deliver(
                 state,
-                body,
+                bodies,
                 current_max,
                 kind,
                 current_free_window_max if closures else None,

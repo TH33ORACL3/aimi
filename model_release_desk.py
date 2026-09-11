@@ -25,6 +25,12 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from model_news_eligibility import (
+    annotate_routes,
+    classify_routes,
+    filter_news_candidates,
+)
+
 PROJECT = Path(__file__).resolve().parent
 DB = PROJECT / "aimi.db"
 QUEUE = Path.home() / ".hermes" / "cron" / "model-release-desk-queue.json"
@@ -33,10 +39,20 @@ DESK_ROOT = Path.home() / ".hermes" / "ops" / "model-release-desk"
 PACKAGES = DESK_ROOT / "packages"
 RUNS = DESK_ROOT / "runs"
 ASSETS = DESK_ROOT / "assets"
-VERSION = "model-release-desk/1.0"
+VERSION = "model-release-desk/1.2"
 QUEUE_VERSION = 1
 MAX_BATCH = 12
-PI_TIMEOUT_SECONDS = 3600
+RETRYABLE_SUPPRESSED_STATUSES = frozenset(
+    {"bulk_endpoint_sync", "endpoint_observation_without_release", "suppressed"}
+)
+DEFAULT_PI_TIMEOUT_SECONDS = 900
+try:
+    PI_TIMEOUT_SECONDS = max(
+        60,
+        int(os.environ.get("AIMI_RELEASE_DESK_PI_TIMEOUT_SECONDS", DEFAULT_PI_TIMEOUT_SECONDS)),
+    )
+except (TypeError, ValueError):
+    PI_TIMEOUT_SECONDS = DEFAULT_PI_TIMEOUT_SECONDS
 LOCAL_TIMEZONE = ZoneInfo("Africa/Johannesburg")
 PI_MODEL = os.environ.get("AIMI_RELEASE_DESK_MODEL", "openai-codex/gpt-5.6-sol")
 
@@ -170,7 +186,7 @@ def same_day_context(
             JOIN evidence_sources es ON es.evidence_source_id = me.evidence_source_id
             WHERE me.confidence IN ('verified', 'corroborated')
               AND me.event_type IN ('announcement', 'preview_release', 'general_release',
-                                    'api_availability', 'weights_release', 'endpoint_first_seen')
+                                    'api_availability', 'weights_release')
               AND datetime(me.event_time) >= datetime(?)
               AND datetime(me.event_time) < datetime(?)
             ORDER BY datetime(me.event_time), me.model_event_id
@@ -178,12 +194,16 @@ def same_day_context(
             (start_utc, end_utc),
         ).fetchall()
     ]
+    additions = classify_routes(annotate_routes(connection, additions))
     return {
         "local_date": local_date,
         "timezone": "Africa/Johannesburg",
         "start_utc": start_utc,
         "end_utc": end_utc,
         "endpoint_additions": additions,
+        "eligible_endpoint_additions": [
+            item for item in additions if item.get("news_eligible")
+        ],
         "verified_events": verified_events,
     }
 
@@ -280,18 +300,32 @@ def seed_today(queue: dict) -> int:
     connection.close()
     known = {
         event_key(item)
-        for section in (queue.get("pending", []), queue.get("processed", []))
-        for item in section
+        for item in queue.get("pending", [])
         if isinstance(item, dict)
     }
+    known.update(
+        event_key(item)
+        for item in queue.get("processed", [])
+        if isinstance(item, dict)
+        and item.get("status") not in RETRYABLE_SUPPRESSED_STATUSES
+    )
     count = 0
     for row in context["endpoint_additions"]:
+        if not row.get("news_eligible"):
+            continue
         change_id = int(row["endpoint_change_id"])
         if change_id in known:
             continue
         queue["pending"].append(
             {
                 "endpoint_change_id": change_id,
+                "monitoring_run_id": row.get("monitoring_run_id"),
+                "monitoring_run_added_count": row.get("monitoring_run_added_count"),
+                "provider_model_id": row.get("provider_model_id"),
+                "canonical_model_id": row.get("canonical_model_id"),
+                "news_eligibility_reason": row.get("news_eligibility_reason"),
+                "same_day_official_release": row.get("same_day_official_release", False),
+                "discovery_group_size": row.get("discovery_group_size"),
                 "provider_id": row.get("provider_id"),
                 "provider_name": row.get("provider_id"),
                 "model_identifier": row.get("model_identifier"),
@@ -320,6 +354,7 @@ User authorisation and boundaries:
 - Aubrey explicitly authorised automatic publication of verified AI model releases to the AZ Labs News section.
 - For verified releases, publish the prepared visual X thread automatically after the live article is verified. Aubrey has already approved this workflow.
 - Do not write newly discovered model facts into AIMI. They remain candidates unless Aubrey separately approves catalogue ingestion.
+- The wrapper has already applied the deterministic news gate. Bulk endpoint synchronisations and origin-provider backfills must never become website/X news. A candidate is publishable only after verifying a real release with official same-day evidence, or a genuinely newsworthy aggregator/gateway route addition.
 - Do not use the deep `research` skill. AIMI is the source of truth for catalogue state. Use official primary pages and the read-only `bird` skill only to verify release claims and source images where the editorial skill requires them.
 
 Input:
@@ -332,7 +367,7 @@ Input:
 
 Workflow:
 1. Run `date` and inspect the trigger routes with AIMI (`./aimi where`, `./aimi route`, `./aimi timeline`, `./aimi changes`) from {PROJECT}. Separate endpoint-first-seen time from announcement, GA, API and weights dates.
-2. Verify whether each canonical model is a real new release. Prefer the maker's official docs/account. A provider listing alone is not enough. OpenCode/OpenRouter announcements can verify their route availability but not a maker release unless they say so explicitly.
+2. Verify whether each canonical model is a real new release or a meaningful aggregator route addition. Prefer the maker's official docs/account for release claims. A provider listing alone is not enough. OpenCode/OpenRouter announcements can verify their route availability but not a maker release unless they say so explicitly. Never publish a bulk-sync or origin-provider endpoint backfill merely because it is present in the catalogue.
 3. Use all earlier verified releases from the same SAST day in the input. Calculate exact elapsed times. If releases form a rapid sequence, make that cadence part of the narrative. Never claim one company responded to another unless a primary source establishes causation. Safe wording includes "the third major model to surface today" or "arrived X minutes after".
 4. Dedupe provider aliases and routes by canonical model. Check existing AZ Labs News slugs and today's package summaries. Update an existing same-model article instead of publishing a duplicate. If several verified releases form one coherent wave, a single roundup article and social package is allowed.
 5. For a verified release, follow the loaded `azlabs-editorial-publishing` skill completely: isolated worktree, British English, humanized copy, primary citations, lawful hero image, Fish Audio story/TLDR, validation, AZLabsAI GitHub preflight, PR, green checks, merge and live HTTP verification. Do not call the article published before production is live.
@@ -498,6 +533,33 @@ def validate_package(package: dict, package_id: str) -> None:
                 raise RuntimeError(f"Approval package {key} contains a banned em dash")
 
 
+def suppress_candidates(
+    queue: dict,
+    items: list[dict],
+) -> None:
+    """Remove legacy ineligible queue entries without invoking Pi."""
+    suppressed_ids = {event_key(item) for item in items}
+    queue["pending"] = [
+        item for item in queue.get("pending", [])
+        if event_key(item) not in suppressed_ids
+    ]
+    for item in items:
+        queue.setdefault("processed", []).append(
+            {
+                "endpoint_change_id": event_key(item),
+                "provider_id": item.get("provider_id"),
+                "model_identifier": item.get("model_identifier"),
+                "processed_at": utc_now(),
+                "package_id": None,
+                "package_path": None,
+                "status": item.get("news_eligibility_reason") or "suppressed",
+            }
+        )
+    queue["processed"] = queue["processed"][-2000:]
+    queue.pop("active_batch", None)
+    save_queue(queue)
+
+
 def complete_batch(queue: dict, items: list[dict], package_path: Path, package: dict) -> None:
     completed_ids = {event_key(item) for item in items}
     queue["pending"] = [
@@ -572,10 +634,17 @@ def process_pending(*, dry_run: bool = False, seed: bool = False) -> int:
     if not pending:
         return 0
     selected_date = event_local_date(pending[0])
-    items = [item for item in pending if event_local_date(item) == selected_date][:MAX_BATCH]
+    selected_items = [
+        item for item in pending if event_local_date(item) == selected_date
+    ]
 
     connection = db_connection()
+    eligible_items, suppressed_items = filter_news_candidates(
+        selected_items,
+        connection=connection,
+    )
     day_context = same_day_context(connection, selected_date)
+    items = eligible_items[:MAX_BATCH]
     sellable_products = [
         {
             "provider_id": item.get("provider_id"),
@@ -585,6 +654,30 @@ def process_pending(*, dry_run: bool = False, seed: bool = False) -> int:
         for item in items
     ]
     connection.close()
+    if suppressed_items and not dry_run:
+        suppress_candidates(queue, suppressed_items)
+        queue = load_queue()
+    if not items:
+        if dry_run:
+            print(
+                json.dumps(
+                    {
+                        "version": VERSION,
+                        "local_date": day_context["local_date"],
+                        "trigger_candidates": [],
+                        "suppressed_candidates": suppressed_items,
+                        "same_day": day_context,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        elif suppressed_items:
+            print(
+                f"AIMI release desk skipped {len(suppressed_items)} "
+                "endpoint-only or bulk-sync candidate(s); Pi was not called."
+            )
+        return 0
     package_id = batch_id(items, day_context["local_date"])
     run_dir = RUNS / package_id
     package_path = PACKAGES / f"{package_id}.json"
@@ -594,11 +687,14 @@ def process_pending(*, dry_run: bool = False, seed: bool = False) -> int:
         "version": VERSION,
         "package_id": package_id,
         "trigger_candidates": items,
+        "suppressed_candidates": suppressed_items,
         "same_day": day_context,
         "sellable_products": sellable_products,
         "earlier_packages_today": package_summaries_for_day(day_context["local_date"]),
         "rules": {
             "endpoint_observation_is_not_release": True,
+            "bulk_endpoint_sync_is_not_news": True,
+            "news_requires_same_day_release_or_aggregator_addition": True,
             "website_publication_authorised": True,
             "x_auto_post_verified_releases": True,
             "causation_requires_primary_evidence": True,

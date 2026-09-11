@@ -22,6 +22,13 @@ An evidence-first catalogue for discovering, comparing, configuring, and monitor
 
 ---
 
+## Runtime ownership
+
+> **Pal is the canonical operational host** since 2026-09-01: `/root/aimi/aimi.db`
+> and `/root/aimi/`. The MacBook `aimi` command forwards to Pal. Mac-only
+> harness configuration files remain local and are not treated as Pal catalogue
+> state.
+
 ## What AIMI does
 
 AIMI answers a practical question:
@@ -83,7 +90,8 @@ The main CLI is called `aimi`. It can search routes, compare providers, inspect 
 | `aimi.db` | Private authoritative SQLite database, kept out of Git |
 | `free_models.db` | Compatibility symlink to `aimi.db` |
 | `monitor_endpoints.py` | Polls official provider model endpoints and records changes |
-| `model_discovery_notifier.py` | Durable 15-minute route alerts plus release-desk candidate queue |
+| `model_discovery_notifier.py` | Durable 15-minute route alerts plus news-eligible release-desk queue |
+| `model_news_eligibility.py` | Shared bulk-sync and release/aggregator news gate |
 | `model_release_desk.py` | Event-driven Pi editorial worker and approval-gated visual X packages |
 | `free_model_health.py` | Runs bounded exact-OK health checks against eligible no-charge routes |
 | `scan_local_harnesses.py` | Scans local harness configuration and availability |
@@ -143,6 +151,18 @@ Run `python install.py --upgrade` on an existing checkout to apply new schema ob
 ```
 
 One small handshake, classified green/orange/red, recorded in `handshake_tests` with the exact reply, HTTP status, latency and token counts. Paid, subscription-only and unclassified routes are refused unless `--allow-paid` is given, so a test cannot quietly spend money or subscription quota. Credentials, request headers and raw provider bodies are never stored, and any token-shaped text is redacted from errors.
+
+### Verifying a Grok Build deployment
+
+`verify_grok_build.py` invokes the real Grok CLI to capture a redacted version, model catalogue, effective user configuration, inspection report, and portable user-asset hashes. It compares those fields across platforms while ignoring only host paths and platform metadata, then runs exact-`OK` prompts for every model in a captured catalogue:
+
+```bash
+python3 verify_grok_build.py capture --cwd /path/to/clean-dir --output mac-source-manifest.json
+python3 verify_grok_build.py compare mac-source-manifest.json target-manifest.json
+python3 verify_grok_build.py smoke --manifest mac-source-manifest.json --output model-smokes.json
+```
+
+The checker never reads authentication files or writes provider credentials. If Hyperfine is installed it uses one run per model; otherwise it runs each command twice.
 
 The CLI opens the database **read-only** for every command except `changes-review`, so a query can never damage the catalogue or block the endpoint monitor. Set `AIMI_DB` to point the CLI at a copy or an export.
 
@@ -279,14 +299,16 @@ The endpoint monitor covers OpenRouter, OpenCode Zen, OpenCode Go, NVIDIA NIM, D
 The consolidated Hermes discovery job is:
 
 ```text
-model-release-discovery-desk (f8ff78fe2fb2)
+model-release-discovery-desk (762bf502788c)
 ```
 
-It runs every 15 minutes, polls all eleven endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and notifies Telegram when a route is **added or removed at any provider** or when a provider-confirmed free window closes. Removals that match a model still enabled in a local harness are listed first and flagged, because those are the ones that will start failing. Free-window closure notifications use a separate watermark so a failed Telegram delivery cannot lose the event or advance past it. Long provider sweeps are summarised and bounded below Telegram's message limit. Discovery cards use Telegram Markdown formatting and show route, endpoint, local first-seen time, access classification, and the available context/capability metadata. Times default to `Africa/Johannesburg` (`SAST`); set `AIMI_LOCAL_TIMEZONE` only when the notification recipient's timezone changes.
+It runs every 15 minutes, polls all eleven endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and notifies Telegram when a route is **🆕 ADDED**, **🗑️ REMOVED**, or when a provider-confirmed free window closes as **⏰ FREE ACCESS ENDED**. Bulk re-listings are labelled **🔄 RESYNC** instead of being presented as new releases. Removals that match a model still enabled in a local harness are listed first and marked **🚨 ACTION NEEDED**, because those are the ones that will start failing. Free-window closure notifications use a separate watermark so a failed Telegram delivery cannot lose the event or advance past it. Long provider sweeps are split into bounded Telegram parts instead of being silently truncated. Discovery cards use Telegram Markdown formatting and show route, endpoint, local first-seen time, access classification, and the available context/capability metadata. Times default to `Africa/Johannesburg` (`SAST`); set `AIMI_LOCAL_TIMEZONE` only when the notification recipient's timezone changes.
 
-Delivery is durable and retry-safe. The watcher writes a pending outbox item before sending through `hermes send --json`, retries the send, and advances `last_change_id` only after Hermes reports success. A failed delivery leaves the alert pending for the next run. The outer Hermes `deliver: telegram` setting remains as a failure fallback. The state file at `~/.hermes/cron/model-catalogue-discovery-notifier.json` is atomic, private, and carries the delivery attempt/result metadata. Delivery is at-least-once: a crash immediately after Telegram accepts a message can cause one duplicate, but cannot silently lose an alert.
+Delivery is durable and retry-safe. The watcher writes a pending outbox item before sending through `hermes send --json`, retries each part, records the next undelivered part, and advances `last_change_id` only after every part is acknowledged. A failed delivery leaves the alert pending for the next run. The outer Hermes `deliver: telegram` setting remains as a failure fallback. The state file at `~/.hermes/cron/model-catalogue-discovery-notifier.json` is atomic, private, and carries the delivery attempt/result metadata. Delivery is at-least-once: a crash immediately after Telegram accepts a message can cause one duplicate, but cannot silently lose an alert.
 
-Every `model_added` route is also written to the private durable queue at `~/.hermes/cron/model-release-desk-queue.json`. After a successful detector pass, the same Hermes entrypoint invokes `model_release_desk.py`. It exits silently when the queue is empty; Pi is therefore called only when a real route candidate exists. The worker supplies Pi with the complete SAST-day AIMI timeline, earlier publication packages and strict release-evidence rules. Endpoint observations that cannot be verified as releases remain candidate-only and are not published.
+Only **news-eligible** `model_added` routes are written to the private editorial queue at `~/.hermes/cron/model-release-desk-queue.json`. A shared gate treats five or more additions from one provider monitoring run as a bulk catalogue synchronisation, not release news. Origin-provider endpoint observations without verified official same-day release evidence are also excluded. Non-bulk additions from the explicit aggregator/gateway allowlist (`cloudflare-ai`, `cline`, `kilo`, `nvidia-nim`, `ollama-cloud`, `openrouter`, `opencode-go`, `opencode-zen`) can proceed as route-availability candidates. The notifier still sends a technical Telegram sync alert, clearly marked as not editorial news.
+
+After a successful detector pass, the same Hermes entrypoint invokes `model_release_desk.py`. The release desk independently re-checks legacy queue entries before calling Pi, so an older bulk queue cannot become a website/X post. It exits silently after suppressing ineligible entries. The worker supplies Pi with the complete SAST-day AIMI timeline, earlier publication packages and strict release-evidence rules. Endpoint observations that cannot be verified as releases remain candidate-only and are not published.
 
 For a verified release, the worker loads the AIMI, AZ Labs editorial, humanizer, bird, Firecrawl and Fish TTS skills. It may publish and verify an AZ Labs News article under Aubrey's standing authorisation. It then downloads the deployed article's Twitter image into `~/.hermes/ops/model-release-desk/assets/`, posts the verified visual thread through `post-to-x` as `@TH33ORACL3`, verifies the root and reply URLs, and sends Aubrey a Telegram receipt containing the links. X publication is covered by Aubrey's standing approval for verified model releases. A failed X post or Telegram receipt remains retryable and never marks the package complete until the required result is recorded.
 
@@ -299,15 +321,15 @@ Provider failures are reported only when they first occur, change, or recover. T
 Free-model health runs weekly:
 
 ```text
-aimi-free-model-health-weekly (da87bcef9fc4)
+aimi-free-model-health-weekly (2cbae684a4a1)
 ```
 
-One weekly pass over every route the catalogue verifies as no-charge, including NVIDIA NIM's developer tier. It reports the green/orange/red counts and any status transitions since the previous run. Runtime-confirmed OpenCode Zen promotion withdrawals are reconciled immediately, rather than waiting for a model ID to disappear from the models endpoint.
+One weekly pass over every route the catalogue verifies as no-charge, including NVIDIA NIM's developer tier. It reports the green/orange/red counts and any status transitions since the previous run. SQLite writes use a busy timeout and bounded retries so the health pass can coexist with the 15-minute discovery poll. Runtime-confirmed OpenCode Zen promotion withdrawals are reconciled immediately, rather than waiting for a model ID to disappear from the models endpoint.
 
 Inspect it with:
 
 ```bash
-hermes cron runs f8ff78fe2fb2
+hermes cron runs 762bf502788c
 ```
 
 The former standalone endpoint monitor and the two older health jobs (12-hourly free health, weekly NVIDIA NIM) were consolidated into the two jobs above: one 15-minute discovery notifier and one weekly health pass.

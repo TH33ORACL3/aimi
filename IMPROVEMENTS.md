@@ -1,12 +1,26 @@
 # AIMI improvement plan
 
-Status as of 2026-08-01. Items in "Done" shipped in commits `78fdd2f` and `590772d`.
-Everything under "Needs a decision" and "Proposed" is deliberately **not** implemented,
-because it either changes authoritative data or changes a policy Aubrey set.
+Status updated 2026-08-27. Items in "Done" shipped in commits `78fdd2f` and `590772d`,
+plus the approved notification QoL patch in this working tree. Everything under "Needs a
+decision" and "Proposed" is deliberately **not** implemented, because it either changes
+authoritative data or changes a policy Aubrey set.
 
 ---
 
 ## Done
+
+### Round 3 (2026-08-27, approved)
+
+| Area | Change |
+|---|---|
+| Phone alerts | Added unambiguous `🆕 ADDED`, `🗑️ REMOVED`, `⏰ FREE ACCESS ENDED`, `🔄 RESYNC`, and provider-status labels. |
+| Phone alerts | Removed suppressed bulk-sync routes from the new-model cards and replaced them with a resync/endpoint-observation summary. |
+| Delivery | Long Telegram alerts now split into bounded parts; the durable outbox records the next part and advances the watermark only after all parts succeed. |
+| Health | Weekly free-model SQLite connections now wait up to 30 seconds and retry transient lock errors with bounded backoff. |
+| Release desk | Pi verification timeout is bounded to 15 minutes by default, configurable with `AIMI_RELEASE_DESK_PI_TIMEOUT_SECONDS`. |
+| Tests/docs | Added formatter, split-delivery, retry, and updated job/status documentation coverage. |
+
+---
 
 ### Round 2 (2026-08-01, after review)
 
@@ -19,7 +33,7 @@ because it either changes authoritative data or changes a policy Aubrey set.
 | Validation | `confident_claims_have_capture` replaces the blunt check: only claims asserting confidence need a capture |
 | CLI | `aimi test <provider> <model>` — one sanitized handshake, green/orange/red, recorded in `handshake_tests`, refuses paid/subscription routes without `--allow-paid` |
 | Alerts | Discovery notifier now reports **removals as well as additions at every provider**, flags removals that match a locally configured model, and summarises long provider sweeps to stay inside Telegram's limit |
-| Monitoring | Weekly job `aimi-free-model-health-weekly` (`da87bcef9fc4`) restored, covering every verified free route including NVIDIA NIM |
+| Monitoring | Weekly job `aimi-free-model-health-weekly` (`2cbae684a4a1`) restored, covering every verified free route including NVIDIA NIM |
 | Diagnostics | Empty provider error bodies no longer stored as `{}`; the HTTP status and alternative fields are used instead |
 
 **Validation now passes 16/16.**
@@ -145,7 +159,7 @@ that live config wins and the count fluctuating is expected. Say the word and I 
 
 14. ~~Alert when a model disappears~~ **Done**, and expanded to every provider for both additions
     and removals, with local-impact flagging.
-15. ~~Weekly free-health job~~ **Done** (`da87bcef9fc4`).
+15. ~~Weekly free-health job~~ **Done** (`2cbae684a4a1`).
 16. **Filter non-chat routes out of health probes.** Some listed routes are embedding, rerank or
     vision models that can never satisfy an exact-OK chat handshake. Detect them from modalities or
     task metadata rather than probing them weekly.

@@ -136,6 +136,36 @@ class ModelReleaseDeskTests(unittest.TestCase):
             "attempts": 0,
         }
 
+    def test_bulk_legacy_queue_entries_are_skipped_without_calling_pi(self) -> None:
+        queue = desk.empty_queue()
+        detected_at = desk.local_day_bounds()[1]
+        queue["pending"] = [
+            {
+                "endpoint_change_id": 100 + position,
+                "monitoring_run_id": 44,
+                "monitoring_run_added_count": 6,
+                "provider_id": "openai",
+                "model_identifier": f"legacy/model-{position}",
+                "model_name": f"Legacy Model {position}",
+                "detected_at": detected_at,
+                "attempts": 0,
+            }
+            for position in range(6)
+        ]
+        desk.save_queue(queue)
+
+        with patch.object(desk, "run_pi") as runner:
+            result = desk.process_pending()
+
+        self.assertEqual(result, 0)
+        runner.assert_not_called()
+        saved = desk.load_queue()
+        self.assertEqual(saved["pending"], [])
+        self.assertEqual(len(saved["processed"]), 6)
+        self.assertTrue(
+            all(item["status"] == "bulk_endpoint_sync" for item in saved["processed"])
+        )
+
     def test_dry_run_builds_same_day_context_without_consuming_queue(self) -> None:
         queue = desk.empty_queue()
         queue["pending"].append(self._queue_event())
@@ -149,6 +179,7 @@ class ModelReleaseDeskTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["trigger_candidates"][0]["endpoint_change_id"], 15)
         self.assertEqual(payload["same_day"]["endpoint_additions"][0]["model_identifier"], "example/new-model")
+        self.assertEqual(payload["same_day"]["verified_events"], [])
         self.assertTrue(payload["rules"]["x_auto_post_verified_releases"])
         self.assertEqual(len(desk.load_queue()["pending"]), 1)
 
@@ -218,6 +249,10 @@ class ModelReleaseDeskTests(unittest.TestCase):
         self.assertIn(f"MEDIA:{media}", rendered)
         self.assertIn("1. Post this exact visual thread", rendered)
         self.assertIn("3. Skip X", rendered)
+
+    def test_pi_timeout_is_bounded_by_default(self) -> None:
+        self.assertEqual(desk.PI_TIMEOUT_SECONDS, desk.DEFAULT_PI_TIMEOUT_SECONDS)
+        self.assertEqual(desk.PI_TIMEOUT_SECONDS, 900)
 
     def test_batch_id_is_stable_across_retries(self) -> None:
         items = [self._queue_event()]
