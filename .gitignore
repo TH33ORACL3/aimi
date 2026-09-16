@@ -45,6 +45,11 @@ research.md
 .omo/
 .learnings/
 
+# Generated local reports and private guidance
+validation-report.*
+pi-session-*.html
+CLAUDE.md
+
 # Python/macOS
 __pycache__/
 *.pyc

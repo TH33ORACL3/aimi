@@ -391,11 +391,15 @@ The exporter removes private state, runs SQLite integrity validation, and perfor
 ./export_sanitized.py
 ```
 
-The latest machine-readable validation result is stored in `validation-report.json`.
+Validation writes a machine-readable result to the ignored local file `validation-report.json`; it is not part of the public repository.
 
 ## Privacy
 
 AIMI is designed around a private local catalogue with a safe public export. API-key values are not stored in the database or repository. The AIMI-only OpenRouter key is kept outside the repository in `~/.config/aimi/credentials.env` with mode `0600`; only its environment-variable name is recorded in the catalogue. Raw evidence, snapshots, local configuration inventories, and the private database are excluded from the Git repository.
+
+## License
+
+AIMI is released under the MIT License. See [LICENSE](LICENSE).
 
 ## Roadmap
 
