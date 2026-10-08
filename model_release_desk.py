@@ -47,6 +47,8 @@ ASSETS = DESK_ROOT / "assets"
 VERSION = "model-release-desk/1.2"
 QUEUE_VERSION = 1
 MAX_BATCH = 12
+RETRY_BASE_SECONDS = 300
+RETRY_MAX_SECONDS = 3600
 RETRYABLE_SUPPRESSED_STATUSES = frozenset(
     {"bulk_endpoint_sync", "endpoint_observation_without_release", "suppressed"}
 )
@@ -354,9 +356,136 @@ def batch_id(items: list[dict], local_date: str) -> str:
     return f"{local_date.replace('-', '')}-{digest}"
 
 
-def seed_today(queue: dict) -> int:
+def event_timestamp(item: dict) -> float:
+    raw = str(item.get("detected_at") or item.get("queued_at") or utc_now())
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def retry_delay_seconds(attempts: int) -> int:
+    if attempts <= 0:
+        return 0
+    return min(RETRY_BASE_SECONDS * (2 ** (attempts - 1)), RETRY_MAX_SECONDS)
+
+
+def retry_ready(item: dict, now: datetime | None = None) -> bool:
+    attempts = int(item.get("attempts") or 0)
+    last_attempt = item.get("last_attempt_at")
+    if attempts <= 0 or not last_attempt:
+        return True
+    current = now or datetime.now(timezone.utc)
+    normalized = str(last_attempt)
+    normalized = normalized[:-1] + "+00:00" if normalized.endswith("Z") else normalized
+    try:
+        previous = datetime.fromisoformat(normalized)
+    except ValueError:
+        return True
+    if previous.tzinfo is None:
+        previous = previous.replace(tzinfo=timezone.utc)
+    return (current - previous.astimezone(timezone.utc)).total_seconds() >= retry_delay_seconds(attempts)
+
+
+def canonical_group_key(item: dict) -> tuple[str, ...]:
+    provider = str(item.get("provider_id") or "unknown")
+    model_identifier = str(item.get("model_identifier") or "unknown")
+    # OpenRouter's :batch suffix changes the processing tier, not the underlying
+    # model. Group both the base and batch identifier by the normalized route ID.
+    if provider == "openrouter":
+        return ("openrouter_route", model_identifier.removesuffix(":batch"))
+    canonical_id = item.get("canonical_model_id")
+    if canonical_id not in (None, ""):
+        return ("canonical", str(canonical_id))
+    return ("route", provider, model_identifier)
+
+
+def select_first_canonical_group(items: list[dict]) -> list[dict]:
+    if not items:
+        return []
+    group = canonical_group_key(items[0])
+    return [item for item in items if canonical_group_key(item) == group][:MAX_BATCH]
+
+
+def candidate_priority(item: dict, local_today: date) -> int:
+    reason = str(item.get("news_eligibility_reason") or "")
+    if reason == "same_day_official_release":
+        return 0 if event_local_date(item) == local_today else 1
+    if reason == "official_provider_route_added_candidate":
+        return 1
+    if reason == "aggregator_route_added" or "aggregator_route_added" in reason:
+        return 2
+    return 3
+
+
+def prioritize_pending(
+    items: list[dict],
+    local_today: date | None = None,
+) -> list[dict]:
+    """Process current official releases, maker routes, then recent gateway noise."""
+    today = local_today or datetime.now(LOCAL_TIMEZONE).date()
+    return sorted(
+        items,
+        key=lambda item: (
+            candidate_priority(item, today),
+            0 if event_local_date(item) == today else 1,
+            -event_local_date(item).toordinal(),
+            -event_timestamp(item),
+            event_key(item),
+        ),
+    )
+
+
+def ready_for_processing(
+    items: list[dict],
+    *,
+    local_today: date | None = None,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Keep older backlog from jumping ahead while the newest SAST-day group backs off."""
+    ordered = prioritize_pending(items, local_today=local_today)
+    if not ordered:
+        return []
+    active_date = event_local_date(ordered[0])
+    return [
+        item for item in ordered
+        if event_local_date(item) == active_date and retry_ready(item, now)
+    ]
+
+
+def work_context_for_batch(
+    day_context: dict,
+    items: list[dict],
+    suppressed_items: list[dict],
+) -> tuple[dict, list[dict]]:
+    """Keep the model prompt focused on this canonical model and verified day events."""
+    selected_ids = {event_key(item) for item in items}
+    compact_day = dict(day_context)
+    for field in ("endpoint_additions", "eligible_endpoint_additions"):
+        compact_day[field] = [
+            row for row in day_context.get(field, [])
+            if event_key(row) in selected_ids
+        ]
+    suppressed_summary = [
+        {
+            key: item.get(key)
+            for key in (
+                "endpoint_change_id", "provider_id", "model_identifier",
+                "detected_at", "news_eligibility_reason", "discovery_group_size",
+            )
+        }
+        for item in suppressed_items
+    ]
+    return compact_day, suppressed_summary
+
+
+def seed_date(queue: dict, selected_date: date) -> int:
     connection = db_connection()
-    context = same_day_context(connection)
+    context = same_day_context(connection, selected_date)
     connection.close()
     known = {
         event_key(item)
@@ -397,7 +526,7 @@ def seed_today(queue: dict) -> int:
                 "attempts": 0,
                 "last_error": None,
                 "queued_at": utc_now(),
-                "seeded_from_today": True,
+                "seeded_from_date": context["local_date"],
             }
         )
         known.add(change_id)
@@ -405,6 +534,19 @@ def seed_today(queue: dict) -> int:
     if count:
         save_queue(queue)
     return count
+
+
+def seed_today(queue: dict) -> int:
+    return seed_date(queue, datetime.now(LOCAL_TIMEZONE).date())
+
+
+def seed_recent_days(queue: dict, days_back: int) -> int:
+    safe_days = max(0, min(int(days_back), 7))
+    today = datetime.now(LOCAL_TIMEZONE).date()
+    return sum(
+        seed_date(queue, today - timedelta(days=offset))
+        for offset in range(safe_days, -1, -1)
+    )
 
 
 def release_prompt(input_path: Path, result_path: Path, package_id: str, asset_dir: Path) -> str:
@@ -518,17 +660,27 @@ def run_pi(prompt: str, skills: tuple[Path, ...], run_dir: Path) -> subprocess.C
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
     command = pi_command(prompt, skills)
-    shell_command = "source ~/.zshrc >/dev/null 2>&1; exec " + " ".join(
+    shell_path = "/bin/zsh" if Path("/bin/zsh").is_file() else "/bin/bash"
+    profile_path = "~/.zshrc" if shell_path.endswith("/zsh") else "~/.bashrc"
+    shell_command = f"source {profile_path} >/dev/null 2>&1 || true; exec " + " ".join(
         shlex.quote(part) for part in command
     )
-    result = subprocess.run(
-        ["/bin/zsh", "-lc", shell_command],
-        cwd=PROJECT,
-        capture_output=True,
-        text=True,
-        timeout=PI_TIMEOUT_SECONDS,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [shell_path, "-lc", shell_command],
+            cwd=PROJECT,
+            capture_output=True,
+            text=True,
+            timeout=PI_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except Exception as exc:
+        (run_dir / "stdout.txt").write_text("", encoding="utf-8")
+        (run_dir / "stderr.txt").write_text(
+            f"{type(exc).__name__}: {safe_error(exc)}\n",
+            encoding="utf-8",
+        )
+        raise
     (run_dir / "stdout.txt").write_text(result.stdout or "", encoding="utf-8")
     (run_dir / "stderr.txt").write_text(result.stderr or "", encoding="utf-8")
     return result
@@ -649,6 +801,7 @@ def mark_attempt_failure(queue: dict, items: list[dict], error: str) -> None:
             item["attempts"] = int(item.get("attempts") or 0) + 1
             item["last_error"] = safe_error(error)
             item["last_attempt_at"] = utc_now()
+    queue.pop("active_batch", None)
     save_queue(queue)
 
 
@@ -685,18 +838,28 @@ def render_package(package: dict, package_path: Path) -> str:
     return f"AIMI release desk is blocked for {models}. {notes}".strip()
 
 
-def process_pending(*, dry_run: bool = False, seed: bool = False) -> int:
+def process_pending(
+    *,
+    dry_run: bool = False,
+    seed: bool = False,
+    seed_for_date: date | None = None,
+    seed_days_back: int | None = None,
+) -> int:
     queue = load_queue()
-    if seed:
-        seed_today(queue)
+    if seed_days_back is not None:
+        seed_recent_days(queue, seed_days_back)
+        queue = load_queue()
+    elif seed or seed_for_date is not None:
+        seed_date(queue, seed_for_date or datetime.now(LOCAL_TIMEZONE).date())
         queue = load_queue()
     pending = [item for item in queue.get("pending", []) if isinstance(item, dict)]
     if not pending:
         return 0
+    pending = prioritize_pending(pending)
     selected_date = event_local_date(pending[0])
-    selected_items = [
-        item for item in pending if event_local_date(item) == selected_date
-    ]
+    selected_items = ready_for_processing(pending)
+    if not selected_items:
+        return 0
 
     connection = db_connection()
     eligible_items, suppressed_items = filter_news_candidates(
@@ -704,7 +867,12 @@ def process_pending(*, dry_run: bool = False, seed: bool = False) -> int:
         connection=connection,
     )
     day_context = same_day_context(connection, selected_date)
-    items = eligible_items[:MAX_BATCH]
+    items = select_first_canonical_group(eligible_items)
+    day_context, suppressed_for_input = work_context_for_batch(
+        day_context,
+        items,
+        suppressed_items,
+    )
     sellable_products = [
         {
             "provider_id": item.get("provider_id"),
@@ -747,7 +915,7 @@ def process_pending(*, dry_run: bool = False, seed: bool = False) -> int:
         "version": VERSION,
         "package_id": package_id,
         "trigger_candidates": items,
-        "suppressed_candidates": suppressed_items,
+        "suppressed_candidates": suppressed_for_input,
         "same_day": day_context,
         "sellable_products": sellable_products,
         "earlier_packages_today": package_summaries_for_day(day_context["local_date"]),
@@ -799,6 +967,11 @@ def process_pending(*, dry_run: bool = False, seed: bool = False) -> int:
     except subprocess.TimeoutExpired as exc:
         mark_attempt_failure(queue, items, f"Pi timed out after {exc.timeout}s")
         print(f"AIMI release desk failed: Pi timed out after {exc.timeout}s")
+        return 1
+    except Exception as exc:
+        detail = safe_error(exc)
+        mark_attempt_failure(queue, items, detail)
+        print(f"AIMI release desk failed before Pi completed: {detail}")
         return 1
     if result.returncode != 0:
         detail = safe_error(result.stderr or result.stdout or f"Pi exited {result.returncode}")
@@ -927,6 +1100,8 @@ def main() -> int:
     parser.add_argument("package_id", nargs="?")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--seed-today", action="store_true")
+    parser.add_argument("--seed-date", help="Seed eligible endpoint additions from a specific SAST date (YYYY-MM-DD)")
+    parser.add_argument("--seed-days", type=int, help="Backfill eligible endpoint additions for today and up to N preceding SAST days (max 7)")
     parser.add_argument("--confirmed", action="store_true")
     parser.add_argument("--digest", help="Digest printed with the Telegram approval package")
     args = parser.parse_args()
@@ -939,7 +1114,17 @@ def main() -> int:
             return 0
         try:
             if args.action == "process":
-                return process_pending(dry_run=args.dry_run, seed=args.seed_today)
+                if sum((bool(args.seed_today), bool(args.seed_date), args.seed_days is not None)) > 1:
+                    parser.error("--seed-today, --seed-date, and --seed-days cannot be combined")
+                selected_seed_date = date.fromisoformat(args.seed_date) if args.seed_date else None
+                if args.seed_days is not None and args.seed_days < 0:
+                    parser.error("--seed-days must be non-negative")
+                return process_pending(
+                    dry_run=args.dry_run,
+                    seed=args.seed_today,
+                    seed_for_date=selected_seed_date,
+                    seed_days_back=args.seed_days,
+                )
             if args.action == "list":
                 return list_packages()
             if not args.package_id:

@@ -5,7 +5,7 @@ Designed for a future scheduler. It stores credential names, never credential va
 First run establishes a baseline. Later runs emit added/removed/metadata/pricing changes.
 """
 from __future__ import annotations
-import argparse,hashlib,json,os,re,sqlite3,time,urllib.request,urllib.error
+import argparse,hashlib,json,os,re,sqlite3,time,urllib.request,urllib.error,urllib.parse
 from datetime import datetime,timezone
 from decimal import Decimal,InvalidOperation
 from pathlib import Path
@@ -27,6 +27,7 @@ CONFIG={
  'deepseek':('https://api.deepseek.com/v1/models','DEEPSEEK_API_KEY','data'),
  'mistral':('https://api.mistral.ai/v1/models','MISTRAL_API_KEY','data'),
  'openai':('https://api.openai.com/v1/models','OPENAI_API_KEY','data'),
+ 'anthropic':('https://api.anthropic.com/v1/models','ANTHROPIC_API_KEY','data'),
  'gemini':('https://generativelanguage.googleapis.com/v1beta/models','GEMINI_API_KEY','models'),
  'cloudflare-ai':(f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CLOUDFLARE_ACCOUNT_ID','{account_id}')}/ai/models/search?per_page=200",'CLOUDFLARE_API_TOKEN_AZLABS_AI_WORKERS','result'),
  'ollama-cloud':('https://ollama.com/v1/models',None,'data'),
@@ -68,14 +69,10 @@ def safe_url(pid,url):
 TRANSIENT_HTTP_STATUS={408,425,429,500,502,503,504}
 
 
-def fetch(pid,url,env):
- key=os.getenv(env) if env else None; headers={'User-Agent':'AZ-Labs-model-monitor/1.0'}
- if env and not key: raise RuntimeError(f'missing {env}')
- if pid=='gemini': url=url+'?key='+key
- elif key: headers['Authorization']='Bearer '+key
- req=urllib.request.Request(url,headers=headers)
+def _fetch_once(url,headers):
  last_error=None
  for attempt in range(3):
+  req=urllib.request.Request(url,headers=headers)
   try:
    with urllib.request.urlopen(req,timeout=45) as r:return r.status,r.read(),dict(r.headers)
   except urllib.error.HTTPError as exc:
@@ -86,6 +83,38 @@ def fetch(pid,url,env):
    if attempt==2: raise
   time.sleep(2 ** attempt)
  raise last_error or RuntimeError('model endpoint request failed')
+
+
+def fetch(pid,url,env):
+ key=os.getenv(env) if env else None; headers={'User-Agent':'AZ-Labs-model-monitor/1.0'}
+ if env and not key: raise RuntimeError(f'missing {env}')
+ if pid=='gemini': url=url+'?key='+key
+ elif pid=='anthropic':
+  headers['x-api-key']=key
+  headers['anthropic-version']='2023-06-01'
+ elif key: headers['Authorization']='Bearer '+key
+ if pid!='anthropic':return _fetch_once(url,headers)
+ # Anthropic's official Models API defaults to 20 items; fetch every page so
+ # newly released models cannot be hidden beyond the first page.
+ models=[]; seen_cursors=set(); cursor=None; final_status=200; final_headers={}; first_page=None
+ for _ in range(100):
+  query={'limit':1000}
+  if cursor:query['after_id']=cursor
+  page_url=url+'?'+urllib.parse.urlencode(query)
+  final_status,raw,final_headers=_fetch_once(page_url,headers)
+  page=json.loads(raw)
+  if first_page is None:first_page=page
+  page_data=page.get('data')
+  if not isinstance(page_data,list):raise RuntimeError('Anthropic Models API response is missing data[]')
+  models.extend(page_data)
+  if not page.get('has_more'):break
+  next_cursor=page.get('last_id') or (page_data[-1].get('id') if page_data and isinstance(page_data[-1],dict) else None)
+  if not next_cursor or next_cursor in seen_cursors:raise RuntimeError('Anthropic Models API pagination cursor is missing or repeated')
+  seen_cursors.add(next_cursor);cursor=next_cursor
+ else:raise RuntimeError('Anthropic Models API exceeded the 100-page safety limit')
+ combined=dict(first_page or {});combined['data']=models;combined['has_more']=False
+ if models:combined['first_id']=models[0].get('id');combined['last_id']=models[-1].get('id')
+ return final_status,json.dumps(combined,sort_keys=True).encode('utf-8'),final_headers
 
 SECRET_KEY = re.compile(r'(^|[_-])(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|secret)(_|$)', re.I)
 
@@ -160,9 +189,9 @@ def rows(pid,payload,key):
   architecture=x.get('architecture') if isinstance(x.get('architecture'),dict) else {}
   reasoning_details=x.get('reasoning') if isinstance(x.get('reasoning'),dict) else {}
   supported_parameters=x.get('supported_parameters') if isinstance(x.get('supported_parameters'),list) else []
-  context=numeric(first_present(x.get('context_length'),top.get('context_length'),x.get('max_context_length'),x.get('inputTokenLimit'),x.get('context_window_tokens'),x.get('contextWindow'),x.get('context')))
+  context=numeric(first_present(x.get('context_length'),top.get('context_length'),x.get('max_context_tokens') if pid=='anthropic' else None,x.get('max_input_tokens') if pid=='anthropic' else None,x.get('max_context_length'),x.get('inputTokenLimit'),x.get('context_window_tokens'),x.get('contextWindow'),x.get('context')))
   max_input=numeric(first_present(x.get('max_input_tokens'),x.get('max_input'),x.get('max_prompt_tokens'),top.get('max_prompt_tokens'),x.get('inputTokenLimit')))
-  max_output=numeric(first_present(x.get('max_output_tokens'),x.get('max_output'),x.get('outputTokenLimit'),top.get('max_completion_tokens')))
+  max_output=numeric(first_present(x.get('max_output_tokens'),x.get('max_output'),x.get('max_tokens') if pid=='anthropic' else None,x.get('outputTokenLimit'),top.get('max_completion_tokens')))
   input_modalities=extract_modalities(x, 'input_modalities') or as_list(first_present(x.get('input_modalities'),architecture.get('input_modalities'),x.get('modalities')))
   output_modalities=extract_modalities(x, 'output_modalities') or as_list(first_present(x.get('output_modalities'),architecture.get('output_modalities'),x.get('modalities')))
   display_name=first_present(x.get('displayName'),x.get('display_name'))
@@ -177,12 +206,28 @@ def rows(pid,payload,key):
   if x.get('canonical_slug'):alias_values.append({'id':x.get('canonical_slug'),'type':'provider_canonical_slug'})
   if x.get('hugging_face_id'):alias_values.append({'id':x.get('hugging_face_id'),'type':'hugging_face_id'})
   reasoning=capability_value(x,caps,('reasoning','supports_reasoning','thinking'))
+  anthropic_effort=caps.get('effort') if pid=='anthropic' and isinstance(caps.get('effort'),dict) else {}
+  if pid=='anthropic':
+   if isinstance(caps.get('thinking'),dict) and 'supported' in caps['thinking']:
+    reasoning=as_tristate(caps['thinking'].get('supported'))
+   elif isinstance(caps.get('effort'),dict) and 'supported' in caps['effort']:
+    reasoning=as_tristate(caps['effort'].get('supported'))
+   if input_modalities is None and any(name in caps for name in ('image_input','pdf_input')):
+    input_modalities=['text']
+    if isinstance(caps.get('image_input'),dict) and caps['image_input'].get('supported'):input_modalities.append('image')
+    if isinstance(caps.get('pdf_input'),dict) and caps['pdf_input'].get('supported'):input_modalities.append('file')
+   if output_modalities is None:output_modalities=['text']
+   if anthropic_effort:
+    x['reasoning_efforts']=[name for name,value in anthropic_effort.items() if name!='supported' and isinstance(value,dict) and value.get('supported')]
+    if x['reasoning_efforts']:x['reasoning_efforts'].sort(key=lambda name:['low','medium','high','xhigh','max'].index(name) if name in ['low','medium','high','xhigh','max'] else 99)
   if reasoning is None and reasoning_details:reasoning=1
   tools=capability_value(x,caps,('tools','supports_tools','tool_use','tool_calling'))
   if tools is None and 'tools' in supported_parameters:tools=1
   function_calling=capability_value(x,caps,('function_calling','supports_function_calling','function_call'))
   if function_calling is None and ('tools' in supported_parameters or 'tool_choice' in supported_parameters):function_calling=1
   structured_outputs=capability_value(x,caps,('structured_outputs','structured_output','supports_structured_outputs','supports_structured_output'))
+  if pid=='anthropic' and isinstance(caps.get('structured_outputs'),dict):
+   structured_outputs=as_tristate(caps['structured_outputs'].get('supported'))
   if structured_outputs is None and 'response_format' in supported_parameters:structured_outputs=1
   streaming=capability_value(x,caps,('streaming','supports_streaming'))
   if streaming is None and 'stream' in supported_parameters:streaming=1
@@ -308,6 +353,25 @@ def record_endpoint_events(c,provider_model_id,x,source_id,capture_id):
    VALUES(?,?,?,?,?,?,?, 'single_source',?)""",(provider_model_id,event_type,when,event_precision(raw.get(field)),source_id,capture_id,f"Official endpoint field {field} reported {raw.get(field)}.",json.dumps({'provider_field':field,'provider_value':raw.get(field)})))
 
 
+def record_anthropic_release_event(c,provider_model_id,x,source_id,capture_id):
+ # Anthropic's official Models API defines created_at as the model's release time.
+ # Its documented epoch placeholder means the release date is unknown, not 1970.
+ when=x.get('provider_created_at')
+ if not when:return
+ try:
+  normalized=when[:-1]+'+00:00' if str(when).endswith('Z') else str(when)
+  parsed=datetime.fromisoformat(normalized)
+ except (TypeError,ValueError):return
+ if parsed.year<=1970:return
+ exists=c.execute("SELECT 1 FROM model_events WHERE provider_model_id=? AND event_type='general_release' AND event_time=? AND evidence_source_id=? LIMIT 1",(provider_model_id,when,source_id)).fetchone()
+ if exists:return
+ quote=f"Authenticated Anthropic Models API returned created_at={when}; Anthropic documents this field as the model release time."
+ c.execute("""INSERT INTO model_events(provider_model_id,event_type,event_time,time_precision,evidence_source_id,
+  evidence_capture_id,supporting_quote,confidence,details_json)
+  VALUES(?,'general_release',?,?,?,?,?,'single_source',?)""",
+  (provider_model_id,when,event_precision(when),source_id,capture_id,quote,json.dumps({'provider_field':'created_at','date_semantics':'model_release_time'})))
+
+
 def source_capture(c,pid,url,raw,path,status):
  clean=safe_url(pid,url); sha=hashlib.sha256(raw).hexdigest()
  c.execute("INSERT OR IGNORE INTO evidence_sources(url,source_type,publisher,title,official,primary_source,retrieved_at,http_status,trust_priority,verification_status) VALUES(?,?,?, ?,1,1,?,?,1,'verified')",(clean,'api_endpoint',pid,f'{pid} official models endpoint',NOW,status))
@@ -338,6 +402,20 @@ def ensure_target(c,pid,url):
  clean=safe_url(pid,url)
  c.execute("INSERT OR IGNORE INTO monitoring_targets(provider_id,target_type,url,schedule_class,enabled,expected_format,parser_name) VALUES(?,'models_endpoint',?,'frequent',1,'json',?)",(pid,clean,pid))
  return c.execute("SELECT monitoring_target_id FROM monitoring_targets WHERE target_type='models_endpoint' AND url=?",(clean,)).fetchone()[0]
+
+
+def ensure_anthropic_catalog_metadata(c,source_id,capture_id):
+ endpoint=CONFIG['anthropic'][0]
+ c.execute("UPDATE providers SET official_models_endpoint=?,base_url=?,api_style='anthropic-messages',auth_env_var='ANTHROPIC_API_KEY',auth_header='x-api-key; anthropic-version: 2023-06-01',last_verified_at=? WHERE provider_id='anthropic'",(endpoint,'https://api.anthropic.com',NOW))
+ c.execute("""INSERT INTO provider_api_endpoints(provider_id,path,method,endpoint_kind,purpose,auth_required,endpoint_status,first_seen_at,last_verified_at,notes)
+  VALUES('anthropic','/v1/models','GET','models_catalog','List API models with after_id pagination.',1,'available',?,?,?)
+  ON CONFLICT(provider_id,path,method) DO UPDATE SET endpoint_kind=excluded.endpoint_kind,purpose=excluded.purpose,
+  auth_required=1,endpoint_status='available',last_verified_at=excluded.last_verified_at,notes=excluded.notes""",
+  (NOW,NOW,'Requires x-api-key and anthropic-version: 2023-06-01; limit supports up to 1000 and has_more/last_id pagination.'))
+ record_claim(c,'provider','anthropic','official_models_endpoint',endpoint,source_id,capture_id,
+              'Authenticated Anthropic Models API response returned the paginated official model catalogue.')
+ record_claim(c,'provider','anthropic','auth_header','x-api-key; anthropic-version: 2023-06-01',source_id,capture_id,
+              'Anthropic Models API documentation specifies x-api-key and anthropic-version headers.')
 
 
 def ensure_model_source(c,pid,url,status,raw,path,record_count):
@@ -533,6 +611,7 @@ def poll(c,pid,url,env,key):
  snap,sha,is_new=snapshot_for(c,target,pid,raw); sid,cap,_=source_capture(c,pid,url,raw,snap,status)
  source_snapshot_id=ensure_model_source(c,pid,url,status,raw,snap,len(current))
  if pid=='cline':ensure_cline_catalog_metadata(c,sid,cap)
+ if pid=='anthropic':ensure_anthropic_catalog_metadata(c,sid,cap)
  prior=c.execute("SELECT monitoring_run_id,snapshot_path,response_sha256 FROM monitoring_runs WHERE monitoring_target_id=? AND monitoring_run_id<>? AND status IN ('success','unchanged','changed') ORDER BY monitoring_run_id DESC LIMIT 1",(target,run)).fetchone()
  previous={}
  if prior and prior[1] and stored_path(prior[1]).exists():
@@ -547,6 +626,7 @@ def poll(c,pid,url,env,key):
   if pid=='cline':ensure_cline_route_metadata(c,pm,mid,x,sid,cap,not was_known)
   upsert_endpoint_offer(c,pid,pm,x,sid,cap)
   record_endpoint_events(c,pm,x,sid,cap)
+  if pid=='anthropic':record_anthropic_release_event(c,pm,x,sid,cap)
   if is_free(pid,x):
    # Symmetric closure: a model observed as free must not keep a stale paid offer.
    c.execute("UPDATE access_offers SET ends_at=COALESCE(ends_at,?) WHERE provider_model_id=? AND offer_type='paid' AND ends_at IS NULL",(NOW,pm))
@@ -585,7 +665,11 @@ def main(argv=None):
  selected=set(args.provider or CONFIG)
  c=sqlite3.connect(DB);c.execute('PRAGMA foreign_keys=ON');ensure_metadata_schema(c);results=[]
  for pid,(url,env,key) in CONFIG.items():
-  if pid in selected:results.append(poll(c,pid,url,env,key))
+  if pid not in selected:continue
+  if pid=='anthropic' and not os.getenv('ANTHROPIC_API_KEY'):
+   results.append({'provider':pid,'status':'skipped','endpoint':url,'error':'missing ANTHROPIC_API_KEY; official models endpoint requires authentication'})
+   continue
+  results.append(poll(c,pid,url,env,key))
  c.close()
  print(json.dumps(results,indent=2)); return 1 if any(x['status']=='failed' for x in results) else 0
 if __name__=='__main__':raise SystemExit(main())

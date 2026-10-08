@@ -17,6 +17,11 @@ DB=Path(os.environ['AIMI_DB']).expanduser() if os.environ.get('AIMI_DB') else RO
 # must not be silently rewritten to it.
 PI_ALIAS={'nvidia-nim':'nvidia','cloudflare-ai':'cloudflare-workers-ai','factory':'droid'}
 
+def _pi_config_provider(provider, config):
+    """Use Pi's exact local provider key before legacy compatibility aliases."""
+    providers=config.get('providers',{}) if isinstance(config,dict) else {}
+    return provider if provider in providers else PI_ALIAS.get(provider,provider)
+
 def refresh_local_harnesses():
     scanner=ROOT/'scan_local_harnesses.py'
     result=subprocess.run([sys.executable,str(scanner)],capture_output=True,text=True,timeout=30)
@@ -551,8 +556,7 @@ def where(c,a):
         },
     },indent=2,default=str))
 def order_diff(c,a):
- def profile(name):return _order_profile(c,a.harness,name)
- current=profile('current-local-order');preferred=profile('aubrey-preferred-order');
+ current=_live_harness_order(c,a.harness);preferred=_order_profile(c,a.harness,'aubrey-preferred-order');
  out={'harness':a.harness,'current_count':len(current),'preferred_count':len(preferred),'matches':current==preferred,'missing_from_current':[x for x in preferred if x not in current],'unexpected_current':[x for x in current if x not in preferred],'moves':[]}
  pos={x:i+1 for i,x in enumerate(current)}
  for i,x in enumerate(preferred,1):
@@ -604,8 +608,17 @@ def test_route(c,a):
 
 
 def _order_profile(c,harness,name):
- """Ordered provider/model entries for one harness order profile."""
+ """Ordered provider/model entries for one durable harness order profile."""
  return [f"{r['provider_id']}/{r['model_identifier']}" for r in c.execute("SELECT e.provider_id,e.model_identifier FROM model_order_profile_entries e JOIN model_order_profiles p USING(profile_id) WHERE p.harness_id=? AND p.profile_name=? ORDER BY e.position",(harness,name))]
+
+
+def _live_harness_order(c,harness):
+ """Read the live harness config; never substitute a stale AIMI snapshot."""
+ if harness=='pi':
+  path=HOME/'.pi/agent/settings.json'
+  if not path.exists():return []
+  return list(json.loads(path.read_text()).get('enabledModels',[]))
+ return _order_profile(c,harness,'current-local-order')
 
 
 def changes_review(c,a):
@@ -666,8 +679,8 @@ def doctor(c,_):
   # The recorded order profile is a snapshot, not a preference. Aubrey enables
   # and disables models routinely, so drift here is informational, not a fault.
   # The real question is whether an enabled model still exists at its provider.
-  'pi_enabled_models':len(_order_profile(c,'pi','current-local-order')),
-  'pi_enabled_models_missing_at_provider':[e for e in _order_profile(c,'pi','current-local-order') if c.execute("SELECT COUNT(*) FROM provider_models_v2 WHERE provider_id=? AND model_identifier=? AND endpoint_status NOT IN ('removed','unavailable')",(e.split('/',1)[0],e.split('/',1)[1])).fetchone()[0]==0],
+  'pi_enabled_models':len(_live_harness_order(c,'pi')),
+  'pi_enabled_models_missing_at_provider':[e for e in _live_harness_order(c,'pi') if '/' in e and c.execute("SELECT COUNT(*) FROM provider_models_v2 WHERE provider_id=? AND model_identifier=? AND endpoint_status NOT IN ('removed','unavailable')",(e.split('/',1)[0],e.split('/',1)[1])).fetchone()[0]==0],
  }
  print(json.dumps(checks,indent=2))
 def recommend(c,a):
@@ -695,14 +708,14 @@ def pi_fragment(c,a):print(json.dumps({'providers':{a.provider:pi_provider_fragm
 def write_pi_settings(path,d):
  backup=path.with_name(path.name+'.bak.aimi-'+datetime.now().strftime('%Y%m%d-%H%M%S'));shutil.copy2(path,backup);tmp=path.with_suffix('.json.tmp');tmp.write_text(json.dumps(d,indent=2)+'\n');json.loads(tmp.read_text());tmp.replace(path);return backup
 def register_pi_model(c,provider,model,apply):
- path=HOME/'.pi/agent/models.json';d=json.loads(path.read_text()) if path.exists() else {'providers':{}};fragment=pi_provider_fragment(c,provider,model);config_provider=PI_ALIAS.get(provider,provider);existing=d.setdefault('providers',{}).get(config_provider,{})
+ path=HOME/'.pi/agent/models.json';d=json.loads(path.read_text()) if path.exists() else {'providers':{}};fragment=pi_provider_fragment(c,provider,model);config_provider=_pi_config_provider(provider,d);existing=d.setdefault('providers',{}).get(config_provider,{})
  models=[x for x in existing.get('models',[]) if x.get('id')!=model]+fragment['models'];merged={**fragment,**existing,'models':models};d['providers'][config_provider]=merged
  out={'provider':provider,'model':model,'already_registered':any(x.get('id')==model for x in existing.get('models',[])),'apply':apply}
  if apply:out['backup']=str(write_pi_settings(path,d)) if path.exists() else None;path.write_text(json.dumps(d,indent=2)+'\n') if not path.exists() else None
  return out
 def pi_register(c,a):print(json.dumps(register_pi_model(c,a.provider,a.model,a.apply),indent=2))
 def select_pi_model(a):
- path=HOME/'.pi/agent/settings.json';d=json.loads(path.read_text());prefix=PI_ALIAS.get(a.provider,a.provider);entry=f'{prefix}/{a.model}'
+ path=HOME/'.pi/agent/settings.json';d=json.loads(path.read_text());models_path=HOME/'.pi/agent/models.json';models_config=json.loads(models_path.read_text()) if models_path.exists() else {};prefix=_pi_config_provider(a.provider,models_config);entry=f'{prefix}/{a.model}'
  before=list(d.get('enabledModels',[]));models=[x for x in before if x!=entry];position=max(1,min(a.position if a.position is not None else len(models)+1,len(models)+1));models.insert(position-1,entry);d['enabledModels']=models
  if a.default:d['defaultProvider']=prefix;d['defaultModel']=a.model
  out={'entry':entry,'position':position,'set_default':a.default,'before_position':before.index(entry)+1 if entry in before else None,'after_position':position,'apply':a.apply}
@@ -714,9 +727,9 @@ def pi_add_latest_free(c,a):
  if not candidates:raise SystemExit(f'No currently free route found for provider {a.provider}')
  chosen=candidates[0];a.model=chosen['model_identifier'];registration=register_pi_model(c,a.provider,a.model,a.apply);selection=select_pi_model(a);print(json.dumps({'candidate':dict(chosen),'registration':registration,'selection':selection},indent=2,default=str))
 def pi_remove(c,a):
- path=HOME/'.pi/agent/settings.json';d=json.loads(path.read_text());entry=f"{PI_ALIAS.get(a.provider,a.provider)}/{a.model}";before=list(d.get('enabledModels',[]));d['enabledModels']=[x for x in before if x!=entry]
+ path=HOME/'.pi/agent/settings.json';d=json.loads(path.read_text());models_path=HOME/'.pi/agent/models.json';models_config=json.loads(models_path.read_text()) if models_path.exists() else {};prefix=_pi_config_provider(a.provider,models_config);entry=f"{prefix}/{a.model}";before=list(d.get('enabledModels',[]));d['enabledModels']=[x for x in before if x!=entry]
  if entry not in before:raise SystemExit('Model is not enabled in Pi')
- if d.get('defaultProvider')==PI_ALIAS.get(a.provider,a.provider) and d.get('defaultModel')==a.model:raise SystemExit('Refusing to remove the current default model; select another default first')
+ if d.get('defaultProvider')==prefix and d.get('defaultModel')==a.model:raise SystemExit('Refusing to remove the current default model; select another default first')
  out={'entry':entry,'before_position':before.index(entry)+1,'apply':a.apply}
  if a.apply:out['backup']=str(write_pi_settings(path,d))
  print(json.dumps(out,indent=2))
@@ -960,7 +973,7 @@ def _route_row(c, pid, mid):
 
 def _gen_pi(c, pid, mid):
     return {'path': '~/.pi/agent/models.json + ~/.pi/agent/settings.json',
-            'apply': f'aimi pi-register {pid} {mid} --apply  &&  aimi pi-select {pid} {mid} --apply',
+            'apply': 'Back up and edit the local Pi files directly; preserve the current enabledModels order and do not use a Pal-forwarded aimi pi-* command.',
             'config': pi_provider_fragment(c, pid, mid)}
 
 

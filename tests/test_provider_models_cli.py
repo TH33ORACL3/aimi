@@ -101,6 +101,8 @@ class ProviderModelsCommandTests(unittest.TestCase):
 
     def test_factory_droid_pi_alias_and_fragment(self) -> None:
         self.assertEqual(AIMI.PI_ALIAS.get("factory"), "droid")
+        self.assertEqual(AIMI._pi_config_provider("nvidia-nim", {"providers": {"nvidia-nim": {}}}), "nvidia-nim")
+        self.assertEqual(AIMI._pi_config_provider("nvidia-nim", {"providers": {"nvidia": {}}}), "nvidia")
         schema = (ROOT / "schema_v2.sql").read_text()
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             connection = sqlite3.connect(Path(temporary) / "fixture.db")
