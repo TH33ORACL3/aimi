@@ -19,7 +19,7 @@ Supported harness ids: `pi`, `droid`, `opencode`, `zcode`, `codex-cli`, `mistral
 
 | Harness | Config location | Format | Apply |
 |---|---|---|---|
-| **Pi** | `~/.pi/agent/models.json` + `~/.pi/agent/settings.json` | JSON | `aimi pi-register <p> <m> --apply` then `aimi pi-select <p> <m> --apply` |
+| **Pi** | `~/.pi/agent/models.json` + `~/.pi/agent/settings.json` | JSON | Back up and edit the local Pi files directly; preserve the current `enabledModels` order and never use a Pal-forwarded `aimi pi-*` command |
 | **Aside** | `~/.aside/u/0/models.json` + `~/.aside/u/0/credentials.json` | JSON | `aimi aside-register <p> <m> --apply`, then restart Aside. Invoke with `aside -m <p>/<m>` |
 | **Grok Build** | `~/.grok/config.toml` | TOML | `aimi grok-config <p> <m>` → append `[model.*]` block. Thinking models need `api_backend = "messages"` |
 | **Claude Code** | `~/.zshrc` (`ANTHROPIC_*` env) + local proxy for OpenAI-only providers | env | Anthropic-compatible: set `ANTHROPIC_BASE_URL`/`AUTH_TOKEN`/`MODEL`. OpenAI-only (e.g. Cline): local translation proxy `~/bin/claude-cline-proxy.py` + `claude-cline` launcher |

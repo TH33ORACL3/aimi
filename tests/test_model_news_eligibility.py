@@ -121,6 +121,26 @@ class ModelNewsEligibilityTests(unittest.TestCase):
         self.assertEqual(suppressed[0]["news_eligibility_reason"], "bulk_endpoint_sync")
         connection.close()
 
+    def test_single_openai_origin_addition_is_a_candidate_for_editorial_verification(self) -> None:
+        route = {
+            "endpoint_change_id": 3,
+            "provider_id": "openai",
+            "model_identifier": "gpt-6-new",
+            "monitoring_run_id": 10,
+            "detected_at": "2026-08-26T12:15:46+00:00",
+            "same_day_official_release": False,
+        }
+
+        eligible, suppressed = filter_news_candidates([route])
+
+        self.assertEqual(suppressed, [])
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(
+            eligible[0]["news_eligibility_reason"],
+            "official_provider_route_added_candidate",
+        )
+        self.assertFalse(eligible[0]["same_day_official_release"])
+
     def test_single_aggregator_addition_is_eligible(self) -> None:
         route = {
             "endpoint_change_id": 2,

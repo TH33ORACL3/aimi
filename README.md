@@ -180,14 +180,14 @@ The scanner reads the local sources used by each harness, including Pi, Droid, O
 
 ### Pi model ordering
 
+Pi's live order is the MacBook's actual `~/.pi/agent/settings.json`, not an AIMI database snapshot or Pal's `/root/.pi/agent/`.
+
 ```bash
+jq '{defaultProvider,defaultModel,enabledModels}' ~/.pi/agent/settings.json
 ./aimi order-diff pi
-./aimi pi-fragment openrouter 'poolside/laguna-s-2.1:free'
-./aimi pi-register openrouter 'poolside/laguna-s-2.1:free'
-./aimi pi-select openrouter 'poolside/laguna-s-2.1:free' --position 3
 ```
 
-Writes preview by default. Applying a change creates a timestamped backup, then the local configuration is rescanned and validated.
+When adding a route, back up and edit the local `~/.pi/agent/models.json` and `~/.pi/agent/settings.json` directly. Preserve the current order unless a position is explicitly requested, validate both JSON files, and smoke-test with a fresh `pi --model '<provider>/<model-id>' -p 'Reply with exactly OK'`. Do not use a Pal-forwarded `aimi pi-*` command for this MacBook's Pi.
 
 ### Aside custom provider configuration
 
@@ -294,21 +294,23 @@ hyperfine --runs 1 --warmup 0 --show-output \
 
 ## Monitoring official endpoints
 
-The endpoint monitor covers OpenRouter, OpenCode Zen, OpenCode Go, NVIDIA NIM, DeepSeek, Mistral, OpenAI, Gemini, Cloudflare Workers AI, Ollama Cloud, and ClinePass. ClinePass uses its authenticated official catalogue at `https://api.cline.bot/api/v1/ai/cline/recommended-models` because the standard `/models` path returns 404. The monitor saves timestamped captures, hashes evidence, retains the complete sanitised per-model provider payload, normalizes context/limits/capabilities/modalities/aliases where supplied, records additions and removals, and updates access windows without storing secrets. Every poll is retained in `monitoring_runs` and `model_sources`; every detected route/metadata/pricing change is retained in `endpoint_changes` with the monitoring run, endpoint URL, timestamp, and before/after JSON. Provider-supplied aliases are stored in `provider_model_aliases`. Endpoint-reported paid prices are stored in `access_offers`, subscription catalogue membership is stored separately from free access, and explicit lifecycle date fields are recorded as evidence-linked model events without confusing provider-created timestamps with release dates. Transient provider errors are retried, and one provider failure cannot discard successful discoveries from the other providers.
+The endpoint monitor covers OpenRouter, OpenCode Zen, OpenCode Go, NVIDIA NIM, DeepSeek, Mistral, OpenAI, Gemini, Cloudflare Workers AI, Ollama Cloud, and ClinePass. Anthropic's official [`GET /v1/models` endpoint](https://platform.claude.com/docs/en/api/models/list) at `https://api.anthropic.com/v1/models` is also supported when `ANTHROPIC_API_KEY` is configured; it uses `x-api-key` plus `anthropic-version: 2023-06-01` and follows the official `after_id` cursor with up to 1,000 models per page. Without that credential, Anthropic is reported as `skipped` rather than as a failed poll. OpenAI uses its official [`GET /v1/models` endpoint](https://platform.openai.com/docs/api-reference/models/list) at `https://api.openai.com/v1/models`. ClinePass uses its authenticated official catalogue at `https://api.cline.bot/api/v1/ai/cline/recommended-models` because the standard `/models` path returns 404. The monitor saves timestamped captures, hashes evidence, retains the complete sanitised per-model provider payload, normalizes context/limits/capabilities/modalities/aliases where supplied, records additions and removals, and updates access windows without storing secrets. Every poll is retained in `monitoring_runs` and `model_sources`; every detected route/metadata/pricing change is retained in `endpoint_changes` with the monitoring run, endpoint URL, timestamp, and before/after JSON. Provider-supplied aliases are stored in `provider_model_aliases`. Endpoint-reported paid prices are stored in `access_offers`, subscription catalogue membership is stored separately from free access, and explicit lifecycle date fields are recorded as evidence-linked model events without confusing provider-created timestamps with release dates. Anthropic's authenticated `created_at` field is treated as a model release time only because its official API reference defines it that way; the documented epoch placeholder is treated as unknown. Transient provider errors are retried, and one provider failure cannot discard successful discoveries from the other providers.
 
 The consolidated Hermes discovery job is:
 
 ```text
-model-release-discovery-desk (762bf502788c)
+model-release-discovery-desk (fa857da45938)
 ```
 
-It runs every 15 minutes, polls all eleven endpoints, updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and notifies Telegram when a route is **🆕 ADDED**, **🗑️ REMOVED**, or when a provider-confirmed free window closes as **⏰ FREE ACCESS ENDED**. Bulk re-listings are labelled **🔄 RESYNC** instead of being presented as new releases. Removals that match a model still enabled in a local harness are listed first and marked **🚨 ACTION NEEDED**, because those are the ones that will start failing. Free-window closure notifications use a separate watermark so a failed Telegram delivery cannot lose the event or advance past it. Long provider sweeps are split into bounded Telegram parts instead of being silently truncated. Discovery cards use Telegram Markdown formatting and show route, endpoint, local first-seen time, access classification, and the available context/capability metadata. Times default to `Africa/Johannesburg` (`SAST`); set `AIMI_LOCAL_TIMEZONE` only when the notification recipient's timezone changes.
+It runs every 15 minutes, polls all configured endpoints (including Anthropic when its API key is present), updates endpoint routes and endpoint-first-seen events through the existing AIMI scripts, and notifies Telegram when a route is **🆕 ADDED**, **🗑️ REMOVED**, or when a provider-confirmed free window closes as **⏰ FREE ACCESS ENDED**. Bulk re-listings are labelled **🔄 RESYNC** instead of being presented as new releases. Removals that match a model still enabled in a local harness are listed first and marked **🚨 ACTION NEEDED**, because those are the ones that will start failing. Free-window closure notifications use a separate watermark so a failed Telegram delivery cannot lose the event or advance past it. Long provider sweeps are split into bounded Telegram parts instead of being silently truncated. Discovery cards use Telegram Markdown formatting and show route, endpoint, local first-seen time, access classification, and the available context/capability metadata. Times default to `Africa/Johannesburg` (`SAST`); set `AIMI_LOCAL_TIMEZONE` only when the notification recipient's timezone changes.
 
 Delivery is durable and retry-safe. The watcher writes a pending outbox item before sending through `hermes send --json`, retries each part, records the next undelivered part, and advances `last_change_id` only after every part is acknowledged. A failed delivery leaves the alert pending for the next run. The outer Hermes `deliver: telegram` setting remains as a failure fallback. The state file at `~/.hermes/cron/model-catalogue-discovery-notifier.json` is atomic, private, and carries the delivery attempt/result metadata. Delivery is at-least-once: a crash immediately after Telegram accepts a message can cause one duplicate, but cannot silently lose an alert.
 
-Only **news-eligible** `model_added` routes are written to the private editorial queue at `~/.hermes/cron/model-release-desk-queue.json`. A shared gate treats five or more additions from one provider monitoring run as a bulk catalogue synchronisation, not release news. Origin-provider endpoint observations without verified official same-day release evidence are also excluded. Non-bulk additions from the explicit aggregator/gateway allowlist (`cloudflare-ai`, `cline`, `kilo`, `nvidia-nim`, `ollama-cloud`, `openrouter`, `opencode-go`, `opencode-zen`) can proceed as route-availability candidates. The notifier still sends a technical Telegram sync alert, clearly marked as not editorial news.
+Only **news-eligible** `model_added` routes are written to the private editorial queue at `~/.hermes/cron/model-release-desk-queue.json`. A shared gate treats five or more additions from one provider monitoring run as a bulk catalogue synchronisation, not release news, unless a verified same-day official release event matches the model. Non-bulk additions from the aggregator/gateway allowlist (`cloudflare-ai`, `cline`, `kilo`, `nvidia-nim`, `ollama-cloud`, `openrouter`, `opencode-go`, `opencode-zen`) remain route-availability candidates. Non-bulk additions from official OpenAI and Anthropic model endpoints now enter the queue as **verification candidates** even without a pre-ingested release event; the editorial worker must verify an official same-day announcement before drafting or publishing. This permits first-party endpoint additions to be checked without weakening the bulk-sync or publication gates. The notifier still labels technical route observations as not editorial news.
 
-After a successful detector pass, the same Hermes entrypoint invokes `model_release_desk.py`. The release desk independently re-checks legacy queue entries before calling Pi, so an older bulk queue cannot become a website/X post. It exits silently after suppressing ineligible entries. The worker supplies Pi with the complete SAST-day AIMI timeline, earlier publication packages and strict release-evidence rules. Endpoint observations that cannot be verified as releases remain candidate-only and are not published.
+The detector never waits for editorial work. It durably queues candidates and exits; a separate `model-release-editorial-dispatcher` Hermes job (`9f18ad89179f`) checks the queue every minute. It revalidates legacy entries, selects one canonical model group at a time, and prioritizes current official-release evidence and first-party endpoint candidates ahead of newer gateway-only additions. Recovery seeding covers today and the previous SAST day. Retry delays grow from five minutes and cap at one hour; each failed attempt remains in the queue with its error metadata.
+
+The dispatcher starts each editorial worker in a transient systemd service using `systemd-run --no-block --collect`. That lets Pi calls run independently of Hermes' single cron execution slot; the service is automatically collected after completion. The worker's configured Pi model/thinking settings and the publication gates are unchanged. Its focused prompt includes relevant same-day AIMI evidence and earlier packages. Endpoint observations that cannot be verified as releases remain candidate-only and are not published.
 
 For a verified release, the worker loads the AIMI, AZ Labs editorial, humanizer, bird, Firecrawl and Fish TTS skills. It may publish and verify an AZ Labs News article under Aubrey's standing authorisation. It then downloads the deployed article's Twitter image into `~/.hermes/ops/model-release-desk/assets/`, posts the verified visual thread through `post-to-x` as `@TH33ORACL3`, verifies the root and reply URLs, and sends Aubrey a Telegram receipt containing the links. X publication is covered by Aubrey's standing approval for verified model releases. A failed X post or Telegram receipt remains retryable and never marks the package complete until the required result is recorded.
 
@@ -326,13 +328,14 @@ aimi-free-model-health-weekly (2cbae684a4a1)
 
 One weekly pass over every route the catalogue verifies as no-charge, including NVIDIA NIM's developer tier. It reports the green/orange/red counts and any status transitions since the previous run. SQLite writes use a busy timeout and bounded retries so the health pass can coexist with the 15-minute discovery poll. Runtime-confirmed OpenCode Zen promotion withdrawals are reconciled immediately, rather than waiting for a model ID to disappear from the models endpoint.
 
-Inspect it with:
+Inspect the discovery and editorial queue separately with:
 
 ```bash
-hermes cron runs 762bf502788c
+hermes cron runs fa857da45938  # 15-minute endpoint detector
+hermes cron runs 9f18ad89179f  # 1-minute editorial dispatcher
 ```
 
-The former standalone endpoint monitor and the two older health jobs (12-hourly free health, weekly NVIDIA NIM) were consolidated into the two jobs above: one 15-minute discovery notifier and one weekly health pass.
+The former standalone endpoint monitor and the two older health jobs (12-hourly free health, weekly NVIDIA NIM) were consolidated. Model discovery now has a 15-minute notifier plus a separate 1-minute queue dispatcher; the weekly free-model health pass remains independent.
 
 Query the complete change history without writing SQL:
 

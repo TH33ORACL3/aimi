@@ -207,7 +207,7 @@ class ModelDiscoveryNotifierTests(unittest.TestCase):
             """SELECT 210 AS endpoint_change_id,
                       89 AS monitoring_run_id,
                       1 AS monitoring_run_added_count,
-                      'openai' AS provider_id,
+                      'mistral' AS provider_id,
                       'old/model' AS model_identifier,
                       '2026-08-26T12:15:46+00:00' AS detected_at"""
         ).fetchone()
@@ -223,6 +223,30 @@ class ModelDiscoveryNotifierTests(unittest.TestCase):
         self.assertIn('📡 **ROUTE OBSERVATION:', body)
         self.assertNotIn('🆕 **ADDED:', body)
         self.assertNotIn('Bulk model catalogue sync', body)
+        connection.close()
+
+    def test_single_openai_addition_is_queued_for_verification_not_auto_published(self) -> None:
+        connection = sqlite3.connect(':memory:')
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """SELECT 211 AS endpoint_change_id,
+                      90 AS monitoring_run_id,
+                      2 AS monitoring_run_added_count,
+                      'openai' AS provider_id,
+                      'gpt-6-luna' AS model_identifier,
+                      '2026-08-26T12:15:46+00:00' AS detected_at"""
+        ).fetchone()
+
+        eligible, suppressed = notifier.filter_news_candidates([row])
+
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(eligible[0]['news_eligibility_reason'], 'official_provider_route_added_candidate')
+        self.assertFalse(eligible[0].get('same_day_official_release', False))
+        self.assertEqual(suppressed, [])
+        self.assertEqual(notifier.enqueue_release_candidates([row]), 1)
+        queue = json.loads(self.release_queue_path.read_text())
+        self.assertEqual(queue['pending'][0]['model_identifier'], 'gpt-6-luna')
+        self.assertEqual(queue['pending'][0]['news_eligibility_reason'], 'official_provider_route_added_candidate')
         connection.close()
 
     def test_failed_delivery_keeps_pending_and_does_not_advance_watermark(self) -> None:

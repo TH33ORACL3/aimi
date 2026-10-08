@@ -170,14 +170,35 @@ def scan_pi(conn):
 
 def scan_droid(conn):
     path=Path.home()/'.factory/settings.json'; inst=installation(conn,'droid','FactoryAI Droid','CLI Agent','droid',path)
-    if not path.exists():return
-    source(conn,path,'Droid custom model configuration','Droid')
-    d=json.loads(path.read_text()); default=d.get('sessionDefaultSettings',{}).get('model')
-    for m in d.get('customModels',[]):
-        cid=m.get('id',''); parts=cid.split(':'); pid=parts[1] if len(parts)>2 else 'unknown'
-        meta={'custom_id':cid,'no_image_support':m.get('noImageSupport'),'adapter':m.get('provider'),'base_url':m.get('baseUrl')}
-        add_entry(conn,inst,pid,m['model'],m.get('index'),cid==default,d.get('sessionDefaultSettings',{}).get('reasoningEffort'),m.get('displayName'),None,m.get('maxOutputTokens'),path,meta)
-        add_available(conn,inst,pid,m['model'],path,m.get('index'),m.get('displayName'),meta)
+    if path.exists():
+        source(conn,path,'Droid custom model configuration','Droid')
+        d=json.loads(path.read_text()); default=d.get('sessionDefaultSettings',{}).get('model')
+        for m in d.get('customModels',[]):
+            cid=m.get('id',''); parts=cid.split(':'); pid=parts[1] if len(parts)>2 else 'unknown'
+            meta={'custom_id':cid,'no_image_support':m.get('noImageSupport'),'adapter':m.get('provider'),'base_url':m.get('baseUrl')}
+            add_entry(conn,inst,pid,m['model'],m.get('index'),cid==default,d.get('sessionDefaultSettings',{}).get('reasoningEffort'),m.get('displayName'),None,m.get('maxOutputTokens'),path,meta)
+            add_available(conn,inst,pid,m['model'],path,m.get('index'),m.get('displayName'),meta)
+    scan_droid_native_models(conn, inst)
+
+def scan_droid_native_models(conn, inst):
+    manifest=ROOT/'evidence/factory/droid-binary-manifest.json'
+    bin_path=Path.home()/'.local/bin/droid'
+    src_path=bin_path if bin_path.exists() else manifest
+    if not manifest.exists():return
+    source(conn,src_path,'Factory Droid native binary model registry','Factory AI')
+    try:data=json.loads(manifest.read_text())
+    except Exception:return
+    for pos,(mid,m) in enumerate(data.items(),1):
+        meta={
+            'token_multiplier':m.get('token_multiplier'),
+            'output_token_multiplier':m.get('output_token_multiplier'),
+            'tier':m.get('tier'),
+            'reasoning_default':m.get('reasoning_default'),
+            'new_until':m.get('new_until'),
+            'upstream_provider':m.get('upstream_provider'),
+        }
+        add_available(conn,inst,'factory',mid,src_path,pos,m.get('display_name'),meta)
+
 
 def scan_opencode(conn):
     path=Path.home()/'.config/opencode/opencode.json'; inst=installation(conn,'opencode','OpenCode','CLI Agent','opencode',path)

@@ -166,6 +166,58 @@ class ModelReleaseDeskTests(unittest.TestCase):
             all(item["status"] == "bulk_endpoint_sync" for item in saved["processed"])
         )
 
+    def test_seed_recent_days_backfills_today_and_yesterday_idempotently(self) -> None:
+        queue = desk.empty_queue()
+
+        seeded_first = desk.seed_recent_days(queue, 1)
+        seeded_second = desk.seed_recent_days(desk.load_queue(), 1)
+
+        self.assertEqual(seeded_first, 1)
+        self.assertEqual(seeded_second, 0)
+        self.assertEqual(len(desk.load_queue()["pending"]), 1)
+
+    def test_work_context_keeps_selected_routes_and_verified_events_only(self) -> None:
+        day_context = {
+            "local_date": "2026-09-22",
+            "endpoint_additions": [
+                {"endpoint_change_id": 1, "model_identifier": "old/model"},
+                {"endpoint_change_id": 2, "model_identifier": "new/model"},
+            ],
+            "eligible_endpoint_additions": [
+                {"endpoint_change_id": 1, "model_identifier": "old/model"},
+                {"endpoint_change_id": 2, "model_identifier": "new/model"},
+            ],
+            "verified_events": [{"model_name": "Verified Earlier Release"}],
+        }
+        selected = [{"endpoint_change_id": 2, "provider_id": "openai", "model_identifier": "new/model"}]
+        suppressed = [{
+            "endpoint_change_id": 3,
+            "provider_id": "openrouter",
+            "model_identifier": "openai/new/model:batch",
+            "detected_at": "2026-09-22T12:00:00+00:00",
+            "news_eligibility_reason": "bulk_endpoint_sync",
+            "discovery_group_size": 8,
+            "description": "large endpoint description is dropped",
+        }]
+
+        compact, suppressed_summary = desk.work_context_for_batch(day_context, selected, suppressed)
+
+        self.assertEqual([row["endpoint_change_id"] for row in compact["endpoint_additions"]], [2])
+        self.assertEqual(compact["verified_events"], day_context["verified_events"])
+        self.assertNotIn("description", suppressed_summary[0])
+        self.assertEqual(suppressed_summary[0]["news_eligibility_reason"], "bulk_endpoint_sync")
+
+    def test_seed_date_backfills_eligible_endpoint_candidates_for_requested_day(self) -> None:
+        queue = desk.empty_queue()
+
+        seeded = desk.seed_date(queue, desk.datetime.now(desk.LOCAL_TIMEZONE).date())
+
+        self.assertEqual(seeded, 1)
+        saved = desk.load_queue()
+        self.assertEqual(saved["pending"][0]["endpoint_change_id"], 15)
+        self.assertEqual(saved["pending"][0]["model_identifier"], "example/new-model")
+        self.assertEqual(saved["pending"][0]["seeded_from_date"], desk.datetime.now(desk.LOCAL_TIMEZONE).date().isoformat())
+
     def test_dry_run_builds_same_day_context_without_consuming_queue(self) -> None:
         queue = desk.empty_queue()
         queue["pending"].append(self._queue_event())
@@ -197,6 +249,24 @@ class ModelReleaseDeskTests(unittest.TestCase):
         self.assertEqual(saved["pending"], [])
         self.assertEqual(saved["processed"][0]["endpoint_change_id"], 15)
         self.assertEqual(saved["processed"][0]["status"], "candidate_only")
+
+    def test_attempt_failure_records_error_and_clears_active_batch(self) -> None:
+        item = self._queue_event()
+        queue = desk.empty_queue()
+        queue["pending"].append(item)
+        queue["active_batch"] = {
+            "package_id": "20260922-example",
+            "endpoint_change_ids": [15],
+        }
+        desk.save_queue(queue)
+
+        desk.mark_attempt_failure(queue, [item], "Pi unavailable")
+
+        saved = desk.load_queue()
+        self.assertNotIn("active_batch", saved)
+        self.assertEqual(saved["pending"][0]["attempts"], 1)
+        self.assertEqual(saved["pending"][0]["last_error"], "Pi unavailable")
+        self.assertIsNotNone(saved["pending"][0]["last_attempt_at"])
 
     def test_approval_package_requires_a_real_media_file(self) -> None:
         package = {
@@ -253,6 +323,83 @@ class ModelReleaseDeskTests(unittest.TestCase):
     def test_pi_timeout_is_bounded_by_default(self) -> None:
         self.assertEqual(desk.PI_TIMEOUT_SECONDS, desk.DEFAULT_PI_TIMEOUT_SECONDS)
         self.assertEqual(desk.PI_TIMEOUT_SECONDS, 900)
+
+    def test_prioritize_pending_puts_newest_today_release_before_old_backlog(self) -> None:
+        today = desk.datetime.now(desk.LOCAL_TIMEZONE).date()
+        yesterday = today - desk.timedelta(days=1)
+        today_start = desk.datetime.fromisoformat(desk.local_day_bounds(today)[1])
+        later_today = (today_start + desk.timedelta(hours=1)).isoformat()
+        yesterday_start = desk.local_day_bounds(yesterday)[1]
+        events = [
+            {"endpoint_change_id": 10, "detected_at": yesterday_start},
+            {"endpoint_change_id": 15, "detected_at": today_start.isoformat()},
+            {"endpoint_change_id": 11, "detected_at": yesterday_start},
+            {"endpoint_change_id": 14, "detected_at": later_today},
+        ]
+
+        ordered = desk.prioritize_pending(events, local_today=today)
+
+        self.assertEqual([desk.event_key(item) for item in ordered], [14, 15, 10, 11])
+
+    def test_release_candidates_outrank_later_gateway_routes_across_midnight(self) -> None:
+        today = desk.datetime.now(desk.LOCAL_TIMEZONE).date()
+        yesterday = today - desk.timedelta(days=1)
+        today_start = desk.datetime.fromisoformat(desk.local_day_bounds(today)[1])
+        yesterday_start = desk.local_day_bounds(yesterday)[1]
+        items = [
+            {"endpoint_change_id": 30, "detected_at": (today_start + desk.timedelta(hours=3)).isoformat(), "news_eligibility_reason": "aggregator_route_added"},
+            {"endpoint_change_id": 20, "detected_at": (desk.datetime.fromisoformat(yesterday_start) + desk.timedelta(hours=2)).isoformat(), "news_eligibility_reason": "official_provider_route_added_candidate"},
+            {"endpoint_change_id": 10, "detected_at": (today_start + desk.timedelta(hours=1)).isoformat(), "news_eligibility_reason": "same_day_official_release"},
+        ]
+
+        ordered = desk.prioritize_pending(items, local_today=today)
+
+        self.assertEqual([desk.event_key(item) for item in ordered], [10, 20, 30])
+
+    def test_select_first_batch_contains_one_canonical_model_group(self) -> None:
+        events = [
+            {"endpoint_change_id": 20, "canonical_model_id": 7, "provider_id": "openrouter", "model_identifier": "maker/model"},
+            {"endpoint_change_id": 21, "canonical_model_id": 99, "provider_id": "openrouter", "model_identifier": "maker/model:batch"},
+            {"endpoint_change_id": 22, "canonical_model_id": 8, "provider_id": "openrouter", "model_identifier": "maker/other"},
+        ]
+
+        selected = desk.select_first_canonical_group(events)
+
+        self.assertEqual([desk.event_key(item) for item in selected], [20, 21])
+
+    def test_retry_backoff_is_bounded_and_grows_with_attempts(self) -> None:
+        now = desk.datetime.now(desk.timezone.utc)
+        one_attempt = {"attempts": 1, "last_attempt_at": (now - desk.timedelta(minutes=4)).isoformat()}
+        two_attempts = {"attempts": 2, "last_attempt_at": (now - desk.timedelta(minutes=9)).isoformat()}
+        ready = {"attempts": 2, "last_attempt_at": (now - desk.timedelta(minutes=11)).isoformat()}
+
+        self.assertEqual(desk.retry_delay_seconds(1), 300)
+        self.assertEqual(desk.retry_delay_seconds(4), 2400)
+        self.assertEqual(desk.retry_delay_seconds(5), 3600)
+        self.assertFalse(desk.retry_ready(one_attempt, now))
+        self.assertFalse(desk.retry_ready(two_attempts, now))
+        self.assertTrue(desk.retry_ready(ready, now))
+
+    def test_ready_current_day_backoff_does_not_let_older_backlog_jump_ahead(self) -> None:
+        today = desk.datetime.now(desk.LOCAL_TIMEZONE).date()
+        yesterday = today - desk.timedelta(days=1)
+        now = desk.datetime.now(desk.timezone.utc)
+        current_blocked = {
+            "endpoint_change_id": 20,
+            "detected_at": desk.local_day_bounds(today)[1],
+            "attempts": 1,
+            "last_attempt_at": (now - desk.timedelta(minutes=1)).isoformat(),
+        }
+        older_ready = {
+            "endpoint_change_id": 10,
+            "detected_at": desk.local_day_bounds(yesterday)[1],
+            "attempts": 0,
+        }
+
+        self.assertEqual(
+            desk.ready_for_processing([older_ready, current_blocked], local_today=today, now=now),
+            [],
+        )
 
     def test_batch_id_is_stable_across_retries(self) -> None:
         items = [self._queue_event()]

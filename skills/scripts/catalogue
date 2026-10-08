@@ -79,7 +79,7 @@ case "$command_name" in
     exec python3 record_warp_tests.py "$@"
     ;;
   cron-runs)
-    exec hermes cron runs f8ff78fe2fb2
+    exec hermes cron runs fa857da45938
     ;;
   db-path)
     printf '%s\n' "$PROJECT/aimi.db"

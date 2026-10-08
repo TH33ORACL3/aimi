@@ -33,6 +33,11 @@ AGGREGATOR_PROVIDERS = frozenset(
     }
 )
 
+# Small, non-bulk additions from an official maker endpoint should reach the
+# editorial verifier as candidates. A provider listing is still not release
+# evidence; the release desk must verify a same-day primary announcement.
+OFFICIAL_MODEL_PROVIDERS = frozenset({"anthropic", "openai"})
+
 RELEASE_EVENT_TYPES = frozenset(
     {
         "announcement",
@@ -146,6 +151,9 @@ def classify_routes(
         elif provider in AGGREGATOR_PROVIDERS and not bulk:
             eligible = True
             reason = "aggregator_route_added"
+        elif provider in OFFICIAL_MODEL_PROVIDERS and not bulk:
+            eligible = True
+            reason = "official_provider_route_added_candidate"
         elif bulk:
             eligible = False
             reason = "bulk_endpoint_sync"

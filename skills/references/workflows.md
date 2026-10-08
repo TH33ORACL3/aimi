@@ -73,63 +73,37 @@ Example request: “Check the latest free model available from OpenRouter and ad
      observed_features_json,sanitized_error,runner_version
    ) VALUES(?, 'pi', datetime('now'), 'minimal_chat_completion', ?, ?, ?, ?, 'ai-model-index-skill/1.0');
    ```
-9. If the user explicitly said “add,” register the newly discovered route and append it:
-   ```bash
-   "$catalogue" pi-register openrouter '<exact-model-id>' --apply
-   "$catalogue" pi-select openrouter '<exact-model-id>' --apply
-   ```
-   Alternatively, after confirming the top candidate, the composite command performs both registration and selection:
-   ```bash
-   "$catalogue" pi-add-latest-free --provider openrouter --apply
-   ```
-10. Verify:
+9. If the user explicitly said “add,” write the **local Pi files**, not Pal's Pi and not an AIMI order profile:
+   - Back up the exact local files being changed, using the registered backup pattern.
+   - Add/merge the exact provider block in `~/.pi/agent/models.json` when the route is not already in `models-store.json`.
+   - Append the exact `<provider>/<model-id>` entry to `~/.pi/agent/settings.json`; preserve the current order and do not change the default unless requested.
+10. Verify locally:
     ```bash
-    "$catalogue" scan
+    jq empty ~/.pi/agent/models.json ~/.pi/agent/settings.json
+    pi --list-models
+    pi --model 'openrouter/<exact-model-id>' -p 'Reply with exactly OK'
     "$catalogue" pi-order
-    "$catalogue" order-diff pi
-    "$catalogue" validate
     ```
-11. Report the exact model, position, backup, handshake result and whether adding it intentionally creates a difference from the previous durable order.
+11. Report the exact model, local position, backup paths, handshake result, and whether adding it intentionally creates a difference from the previous local order.
 
 ## Add a known model to Pi
 
-1. Check `monitor-status`. If a live check finds a route absent from or different to the database, present the candidate evidence and get Aubrey's approval before ingestion.
-2. Verify the exact provider/model route with `route` once it exists as an approved/verified route.
-3. Generate and preview custom-provider registration when Pi does not yet know the route:
-   ```bash
-   "$catalogue" pi-fragment <provider> '<model-id>'
-   "$catalogue" pi-register <provider> '<model-id>'
-   ```
-4. Apply registration when authorized. `pi-register` merges the model into the provider and preserves existing entries:
-   ```bash
-   "$catalogue" pi-register <provider> '<model-id>' --apply
-   ```
-5. Smoke-test.
-6. Preview:
-   ```bash
-   "$catalogue" pi-select <provider> '<model-id>' --position <n>
-   ```
-7. Apply only when authorized, then scan and validate.
+1. Check the provider route in Pal's AIMI catalogue for evidence only. If a live check finds a route absent from or different to the database, present the candidate evidence and get Aubrey's approval before any catalogue ingestion.
+2. Inspect the local Pi files first. Search both `~/.pi/agent/models.json` and `~/.pi/agent/models-store.json`; preserve the exact local provider key.
+3. Back up the local file(s) being changed, add/merge the provider model block if needed, and append the exact provider/model string to local `~/.pi/agent/settings.json`.
+4. Validate JSON, run `pi --list-models`, and smoke-test the exact local route with a fresh Pi process.
+5. Verify the final local position with `"$catalogue" pi-order`.
 
 ## Move or make a Pi model default
 
-```bash
-"$catalogue" pi-select <provider> '<model-id>' --position <n> --default
-"$catalogue" pi-select <provider> '<model-id>' --position <n> --default --apply
-```
-
-`pi-select` removes an existing occurrence before inserting it, so it cannot create duplicates. It creates a timestamped backup and writes atomically.
+Edit local `~/.pi/agent/settings.json` only. Remove an existing occurrence before inserting the exact route at the requested position; set `defaultProvider`/`defaultModel` only when explicitly requested. Back up first and validate with `jq empty` and a fresh `pi --list-models` process.
 
 ## Remove a Pi model
 
-1. Run `pi-order` and identify the exact entry.
-2. If it is the current default, select a different default first.
-3. Preview and apply:
-   ```bash
-   "$catalogue" pi-remove <provider> '<model-id>'
-   "$catalogue" pi-remove <provider> '<model-id>' --apply
-   ```
-4. Scan and validate.
+1. Read local `~/.pi/agent/settings.json` and identify the exact entry.
+2. If it is the current default, select another local default first.
+3. Back up the local settings file, remove only that exact entry, validate JSON, and run `pi --list-models`.
+4. Verify with local `"$catalogue" pi-order`.
 
 ## Subscription and entitlement lookup
 
@@ -247,7 +221,7 @@ Unknown end dates must be reported as “duration unpublished,” not “free fo
 "$catalogue" cron-runs
 ```
 
-- The consolidated 15-minute Hermes job is `762bf502788c`, named `model-release-discovery-desk`.
+- The consolidated 15-minute Hermes job is `fa857da45938`, named `model-release-discovery-desk`. It is a recurring job: if Hermes pauses it after an infrastructure worker failure, resume it with `hermes cron resume fa857da45938`, then use `hermes cron run fa857da45938` for an immediate verification.
 - It polls the same 11 official model endpoints, including Cline's authenticated ClinePass catalogue, runs `monitor_endpoints.py`, promotes endpoint-only candidates with `ingest_endpoint_candidates.py`, and sends Telegram for newly observed `model_added` or `model_removed` routes.
 - The shared model-news gate keeps endpoint observations separate from public news: five or more additions from one provider run are labelled bulk catalogue synchronisation and never enter the editorial queue; origin-provider additions need verified official same-day release evidence; non-bulk additions from the explicit aggregator/gateway allowlist remain route-availability candidates.
 - It uses a durable multi-part pending outbox and `hermes send --json`; the endpoint watermark advances only after every part receives a successful delivery acknowledgement. Failed sends retain the next part for the next run, with the outer Hermes Telegram delivery retained as a fallback.

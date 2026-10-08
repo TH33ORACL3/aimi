@@ -13,12 +13,13 @@ metadata:
 
 - Project checkout: `/Users/TH33_ORACL3/AZ Labs/2 - Testing/AIMI` (code, tests, and local development)
 - Canonical operational database: Pal's `/root/aimi/aimi.db`
-- Operational CLI on macOS: `aimi` or `~/bin/aimi` (the Pal-forwarding wrapper); never use project-local `./aimi`, `python3 aimi`, or local `aimi.db` for current model-change answers
-- CLI on Pal: `/usr/local/bin/aimi`; on Windows invoke `py aimi`
-- Skill wrapper: `scripts/catalogue` for local/development commands; verify that it forwards to Pal before using it for time-sensitive operational reads
+- AIMI database/provider CLI on macOS: `aimi` or `~/bin/aimi`; database and endpoint queries may forward to Pal
+- Skill wrapper: `scripts/catalogue`; its Pi/harness commands stay on this MacBook
 - Pi live settings: `~/.pi/agent/settings.json`
 - Pi custom providers: `~/.pi/agent/models.json`
-- Durable Pi order: `~/.pi/agent/AGENTS.md`
+- Pi runtime model store: `~/.pi/agent/models-store.json`
+- **Pi writes and order reads:** use the local Pi files directly; never use a Pal-forwarded `aimi pi-*` command or Pal's `/root/.pi/agent/` for this MacBook
+- CLI on Pal: `/usr/local/bin/aimi`; on Windows invoke `py aimi` for that node's own catalogue/harness only
 - AIMI-only OpenRouter credential: `~/.config/aimi/credentials.env` (mode `0600`, variable `AIMI_OPENROUTER_API_KEY`; value never printed or stored in SQLite)
 
 ## OpenCode subscription providers
@@ -99,18 +100,18 @@ Install or refresh the skill and initialise the database with `python install.py
 
 ## Non-negotiable rules
 
-1. **Live configuration wins for “right now.”** Read Pi's order with `catalogue pi-order`; do not answer from a stale database row or AGENTS.md.
+1. **Local Pi configuration wins for “right now.”** Read the MacBook's order directly from `~/.pi/agent/settings.json` or the local `catalogue pi-order`; never answer from Pal's `/root/.pi/agent/`, a remote `aimi pi-order`, a stale database row, or AGENTS.md.
 2. **Check freshness without silently ingesting chat discoveries.** Before answering “latest,” “currently free,” “newly available,” or current endpoint-availability questions, use the fast composite command when applicable. `catalogue where '<model>'` returns provider routes, access offers, cached harness matches, and freshness metadata in one read, so do not run separate `monitor-status`, `route`, raw SQLite, or harness-scan commands for a simple provider lookup. The command does not rescan local harnesses unless `--refresh-harnesses` is explicitly requested. If live checking in the chat finds information not already represented, present it as a candidate and obtain Aubrey's confirmation before running any ingestion or authoritative update.
-2a. **Pal-first for current changes.** On macOS, run time-sensitive catalogue reads through the Pal-forwarding `aimi` command. For “what changed in the last X hours,” check `aimi monitor-status` first, then `aimi changes --since <UTC cutoff>` and both OpenCode providers with `aimi provider-models opencode-go --include-removed` and `aimi provider-models opencode-zen --include-removed`. If a Telegram alert is mentioned, inspect the Katara notification chat with `tgcli` before concluding that no event occurred. A stale local snapshot or a live endpoint queried after a transient model disappeared is not evidence that nothing happened; report “no recent scan” separately from “no changes.”
+2a. **Pal-first applies only to AIMI database/provider state.** On macOS, run time-sensitive catalogue reads through the Pal-forwarding `aimi` command. For “what changed in the last X hours,” check `aimi monitor-status` first, then `aimi changes --since <UTC cutoff>` and both OpenCode providers with `aimi provider-models opencode-go --include-removed` and `aimi provider-models opencode-zen --include-removed`. If a Telegram alert is mentioned, inspect the Katara notification chat with `tgcli` before concluding that no event occurred. **Do not apply this Pal-first rule to Pi/harness commands or Pi writes.**
 3. **Free means proven no-charge access with precise semantics.** Require an active `genuine_zero_price`, `temporary_free_window`, or officially evidenced `free_tier_quota`. API access, open weights, free chat access, or an API key alone do not prove a free route. Always distinguish permanent zero-price from temporary windows and free developer/evaluation quotas.
 3a. **Subscription access is a separate category.** Use `subscription_included` / subscription-access classification for models included with an Aubrey-held subscription. Subscription inclusion is not `free`, must not appear in free-only results, and must not be tested by the free-model health job. Track genuinely free routes separately, including free models available through the Zen endpoint.
 3b. **Keep OpenCode Go and Zen endpoint-specific.** Use provider ID `opencode-go` with `https://opencode.ai/zen/go/v1` for Go, and provider ID `opencode-zen` with `https://opencode.ai/zen/v1` for Zen. Never merge their model lists, pricing/access offers, endpoint telemetry, or health results.
 4. **Name the date semantics.** Provider `created` time, endpoint first-seen, announcement, GA, API availability, model-card publication, and weights release are different dates. Never collapse them into one release date.
 5. **Null means unknown.** Missing capability/context/output data is unverified, not unsupported.
 6. **Never expose secrets.** Do not print environment variables, complete config files, auth headers, tokens, or literal keys. Generated configuration must use `$ENV_VAR` references. AIMI's OpenRouter route uses the dedicated `AIMI_OPENROUTER_API_KEY` from `~/.config/aimi/credentials.env`; do not substitute the global `OPENROUTER_API_KEY`.
-7. **Preview risky writes.** Model changes preview by default. An explicit user request such as “add it,” “move it,” “remove it,” or “make it default” authorizes that exact write. Otherwise show the preview and request approval.
-8. **Preserve order by default.** If the user says only “add,” append the model. Move or set default only when requested. Never rewrite Aubrey's durable preferred order in AGENTS.md unless he explicitly asks to change that policy.
-9. **Back up and verify.** Pi writes must use `aimi`, which creates timestamped backups. After applying, run `catalogue scan`, `catalogue pi-order`, `catalogue order-diff pi`, and `python validate_catalogue.py`.
+7. **Preview risky writes.** Model catalogue changes preview by default. An explicit user request such as “add it,” “move it,” “remove it,” or “make it default” authorizes that exact local Pi write. Otherwise show the preview and request approval.
+8. **Preserve local Pi order by default.** If the user says only “add,” append the exact route to local `~/.pi/agent/settings.json`. Move or set default only when requested. Never replace local order with an AIMI profile.
+9. **Back up and verify local Pi directly.** Before changing `~/.pi/agent/models.json`, `settings.json`, or `models-store.json`, create a registered backup, write atomically, validate JSON, run `pi --list-models`, and smoke-test the exact route with a fresh local Pi process. `catalogue pi-order` is read-only local verification.
 10. **Test before enabling a newly discovered route.** Run `catalogue test <provider> <model>`. It makes one small sanitized handshake, classifies the result green/orange/red, and records it in `handshake_tests`. It refuses paid, subscription-only and unclassified routes unless `--allow-paid` is given, so a test cannot quietly spend money or subscription quota. Never store response secrets or full request headers.
 11. **Never silently persist newly discovered information.** If an agent finds new model, provider, pricing, release, capability, harness, ranking, or availability information in any chat, treat it as a candidate finding only. Show Aubrey the evidence and ask for explicit confirmation before adding it to or changing it in the database. This is mandatory when the finding differs from, conflicts with, or would supersede existing database information. Do not suggest that the database was already updated, and do not write first and ask afterwards.
 12. **Make conflicts explicit before approval.** Present the current database value, proposed new value, source URL/type, evidence date, confidence, and affected records. Ask a short numbered confirmation such as: `1. Add/update it  2. Keep the database unchanged  3. Save as an unverified candidate only.` Only option 1 authorizes changing verified data. Option 3 may create an explicitly unverified candidate claim but must not alter the current authoritative value.
@@ -130,7 +131,7 @@ Install or refresh the skill and initialise the database with `python install.py
 
 | User intent | Required workflow |
 |---|---|
-| “List all Pi models in order right now” | `catalogue pi-order` |
+| “List all Pi models in order right now” | Read local `~/.pi/agent/settings.json` or run local `catalogue pi-order`; never use Pal's `aimi pi-order` |
 | “What is free on OpenRouter?” | `catalogue monitor-status`, then `catalogue free --provider openrouter`; if stale, disclose that before any proposed refresh |
 | “What OpenCode Go models are available?” | Run `catalogue provider-models opencode-go`; it lists every currently detected route from `https://opencode.ai/zen/go/v1/models` and labels explicit subscription coverage separately from unlinked candidates |
 | “What OpenCode Zen models are available?” | Query the live `opencode-zen` provider and `https://opencode.ai/zen/v1`; report subscription-included and genuinely free routes separately |
@@ -202,14 +203,13 @@ catalogue harness-models opencode
 catalogue harness-models codex-cli --kind configured
 catalogue harness-models codex-cli --kind available
 
-# Pi writes: register new routes, then enable/select them
-catalogue pi-register openrouter 'poolside/laguna-s-2.1:free'
-catalogue pi-register openrouter 'poolside/laguna-s-2.1:free' --apply
-catalogue pi-select openrouter 'poolside/laguna-s-2.1:free'
-catalogue pi-select openrouter 'poolside/laguna-s-2.1:free' --position 5 --apply
-catalogue pi-add-latest-free --provider openrouter
-catalogue pi-add-latest-free --provider openrouter --apply
-catalogue pi-remove openrouter 'poolside/laguna-s-2.1:free' --apply
+# Pi writes: local files only, after an explicit user request and backup
+# 1. Add/merge the exact provider block in ~/.pi/agent/models.json.
+# 2. Append/move the exact provider/model string in ~/.pi/agent/settings.json.
+# 3. Validate JSON and smoke-test with a fresh local Pi process.
+jq '{defaultProvider,defaultModel,enabledModels}' ~/.pi/agent/settings.json
+pi --list-models
+pi --model 'openrouter/poolside/laguna-s-2.1:free' -p 'Reply with exactly OK'
 
 # omp (Oh My Pi) role writes: read-modify-write modelRoles, previews unless --apply
 catalogue omp-select opencode-go deepseek-v4-flash
