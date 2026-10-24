@@ -11,5 +11,15 @@ if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
   echo "AIMI release dispatcher requires Python 3.11+." >&2
   exit 1
 fi
-export AIMI_RELEASE_DESK_MODEL="${AIMI_RELEASE_DESK_MODEL:-openai-codex/gpt-5.6-luna}"
+export AIMI_RELEASE_DESK_MODEL="${AIMI_RELEASE_DESK_MODEL:-deepseek/deepseek-v4-pro}"
+
+# /tmp is a 128 MB tmpfs that fills easily (Node compile-cache, scrape caches,
+# pi subprocess temp files). When it hits 100% the detached Node worker dies
+# with ENOSPC on write. Redirect temp storage to the root filesystem, which
+# has ~16 GB free. /var/tmp is persistent and on the same disk as /root.
+export TMPDIR="${TMPDIR:-/var/tmp}"
+if [[ ! -d "$TMPDIR" ]]; then
+  TMPDIR=/tmp
+fi
+
 exec "$PYTHON_BIN" "$AIMI_DIR/model_release_worker.py" dispatch

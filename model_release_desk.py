@@ -61,7 +61,7 @@ try:
 except (TypeError, ValueError):
     PI_TIMEOUT_SECONDS = DEFAULT_PI_TIMEOUT_SECONDS
 LOCAL_TIMEZONE = ZoneInfo("Africa/Johannesburg")
-PI_MODEL = os.environ.get("AIMI_RELEASE_DESK_MODEL", "openai-codex/gpt-5.6-sol")
+PI_MODEL = os.environ.get("AIMI_RELEASE_DESK_MODEL", "deepseek/deepseek-v4-pro")
 
 SKILLS = (
     Path.home() / ".agents" / "skills" / "ai-model-index" / "SKILL.md",

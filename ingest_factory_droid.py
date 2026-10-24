@@ -22,7 +22,7 @@ def parse_droid_binary(bin_path: Path) -> dict[str, dict]:
     if not bin_path.exists():
         return {}
     data = bin_path.read_bytes()
-    pattern = rb'id:"([a-zA-Z0-9_\.\-]+)",name:"([^"]+)"'
+    pattern = rb'id:"([a-zA-Z0-9_\.\-]+)"[^}]{0,300}?name:"([^"]+)"'
     matches = list(re.finditer(pattern, data))
     
     models = {}
@@ -57,7 +57,7 @@ def parse_droid_binary(bin_path: Path) -> dict[str, dict]:
             if om: out_mult = float(om.group(1))
             cm = re.search(r'cacheReadTokenMultiplier:([0-9\.]+)', c_str)
             if cm: cache_mult = float(cm.group(1))
-        elif "cost:" not in chunk:
+        elif "cost:" not in chunk and "tokenMultiplier" not in chunk:
             continue
             
         reason_m = re.search(r'reasoningEffort:\{supported:\[([^\]]+)\],default:"([^"]+)"\}', chunk)
@@ -68,6 +68,8 @@ def parse_droid_binary(bin_path: Path) -> dict[str, dict]:
             reasoning_default = reason_m.group(2)
             
         new_until_m = re.search(r'newUntil:new Date\("([^"]+)"\)', chunk)
+        if not new_until_m:
+            new_until_m = re.search(r'newUntil:new Date\("([^"]+)"\)', data[max(0, start - 100):start + 200].decode("utf-8", errors="ignore"))
         new_until = new_until_m.group(1) if new_until_m else None
         
         ctx_m = re.search(r'contextLimits:[a-zA-Z0-9_\.]+\(([0-9e\.]+),\s*([0-9e\.]+)', chunk)
@@ -117,10 +119,16 @@ def record_source(c: sqlite3.Connection, url: str, typ: str, publisher: str, tit
 def main():
     EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     
-    # 1. Parse Droid binary models
-    models = parse_droid_binary(DROID_BIN)
+    # 1. Parse Droid binary models (or fall back to archived manifest when headless)
     manifest_path = EVIDENCE_DIR / "droid-binary-manifest.json"
-    manifest_path.write_text(json.dumps(models, indent=2))
+    models = parse_droid_binary(DROID_BIN)
+    if not models and manifest_path.exists():
+        try:
+            models = json.loads(manifest_path.read_text())
+        except Exception:
+            models = {}
+    elif models:
+        manifest_path.write_text(json.dumps(models, indent=2))
     
     # 2. Check for web docs step snapshot to copy into evidence if available
     step_doc = Path("/Users/TH33_ORACL3/.gemini/antigravity/brain/8b6ed48d-7801-496a-bb39-3550a95f6918/.system_generated/steps/51/content.md")

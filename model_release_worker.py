@@ -241,9 +241,9 @@ def dispatch_once() -> int:
         result_path = STATE_DIR / "results" / f"{run_id}.json"
         log_path = run_dir / "launcher.log"
         environment = os.environ.copy()
-        environment.setdefault("AIMI_RELEASE_DESK_MODEL", "openai-codex/gpt-5.6-luna")
+        environment.setdefault("AIMI_RELEASE_DESK_MODEL", "deepseek/deepseek-v4-pro")
         unit_name = f"aimi-model-release-worker-{run_id.lower()}.service"
-        model = environment.get("AIMI_RELEASE_DESK_MODEL", "openai-codex/gpt-5.6-luna")
+        model = environment.get("AIMI_RELEASE_DESK_MODEL", "deepseek/deepseek-v4-pro")
         environment_options = [
             f"--setenv={name}={environment[name]}"
             for name in ("AIMI_RELEASE_DESK_MODEL", "AIMI_RELEASE_DESK_PI_TIMEOUT_SECONDS", "AIMI_TELEGRAM_TARGET")
